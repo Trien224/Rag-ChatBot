@@ -1,6 +1,5 @@
 import sys
 import time
-import os
 from rag_engine import RAGEngine
 
 if sys.platform == "win32":
@@ -32,9 +31,14 @@ def main():
     print(f" -> Câu hỏi: \"{test_question}\"")
     
     t0_query = time.time()
-    answer, sources = engine.query(test_question)
-    t1_query = time.time()
-    latency = t1_query - t0_query
+    result = engine.query(test_question)
+    if isinstance(result, tuple) and len(result) >= 3:
+        answer, sources, latency = result[0], result[1], result[2]
+    elif isinstance(result, tuple) and len(result) == 2:
+        answer, sources = result[0], result[1]
+        latency = time.time() - t0_query
+    else:
+        answer, sources, latency = str(result), [], time.time() - t0_query
 
     print("\n" + "=" * 60)
     print("KẾT QUẢ PHẢN HỒI TỪ GEMINI:")

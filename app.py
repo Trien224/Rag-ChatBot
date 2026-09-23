@@ -101,7 +101,7 @@ if user_query := st.chat_input("Nhập câu hỏi cần tra cứu..."):
     # 2. Sinh câu trả lời
     with st.chat_message("assistant"):
         with st.spinner("Đang tìm kiếm, xếp hạng (Cohere) và tổng hợp kết quả (Gemini)..."):
-            answer, sources = rag.query(user_query)
+            answer, sources, latency = rag.query(user_query)
             st.markdown(answer)
             
             # Hiển thị nguồn trích dẫn

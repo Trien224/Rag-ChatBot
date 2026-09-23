@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAG Document Assistant • Trợ Lý Tra Cứu Tài Liệu AI</title>
+  
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <!-- Marked.js for Markdown & Highlight.js for Code Highlighting -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  
+  <!-- Main Stylesheet -->
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="app-layout">
+    
+    <!-- SIDEBAR: DOCUMENT REPOSITORY & RAG SETTINGS -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand-logo">
+          <div class="logo-icon"><i class="fa-solid fa-brain-circuit"></i></div>
+          <div class="brand-text">
+            <h2>RAG Document AI</h2>
+            <span class="badge-pro">ENTERPRISE</span>
+          </div>
+        </div>
+        <button class="icon-btn close-sidebar-btn" id="closeSidebarBtn" title="Thu gọn sidebar">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Quick Metrics Ribbon -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-val" id="statDocCount">--</div>
+          <div class="metric-label"><i class="fa-solid fa-file-lines"></i> Tài liệu</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-val" id="statVectorCount">--</div>
+          <div class="metric-label"><i class="fa-solid fa-layer-group"></i> Vectors</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-val" id="statAvgLatency">--s</div>
+          <div class="metric-label"><i class="fa-solid fa-bolt"></i> Phản hồi</div>
+        </div>
+      </div>
+
+      <!-- Tab Navigation in Sidebar -->
+      <div class="sidebar-tabs">
+        <button class="tab-btn active" data-tab="docsTab"><i class="fa-solid fa-folder-open"></i> Kho Tài Liệu</button>
+        <button class="tab-btn" data-tab="settingsTab"><i class="fa-solid fa-sliders"></i> Cấu hình RAG</button>
+      </div>
+
+      <!-- TAB 1: DOCUMENTS & INGESTION -->
+      <div class="tab-content active" id="docsTab">
+        
+        <!-- File Ingestion Dropzone -->
+        <div class="upload-section">
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" multiple accept=".pdf,.docx,.doc,.txt,.md" hidden>
+            <div class="dropzone-inner">
+              <div class="upload-icon-pulse">
+                <i class="fa-solid fa-cloud-arrow-up"></i>
+              </div>
+              <h4>Kéo thả hoặc <span class="browse-link">Chọn tệp</span></h4>
+              <p class="dropzone-hint">Hỗ trợ .PDF, .DOCX, .TXT, .MD</p>
+              <div class="format-tags">
+                <span class="format-tag">PDF</span>
+                <span class="format-tag">DOCX</span>
+                <span class="format-tag">TXT</span>
+                <span class="format-tag">MD</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Upload Progress Container -->
+          <div class="upload-progress-card hidden" id="uploadProgressCard">
+            <div class="progress-info">
+              <span id="uploadStatusText"><i class="fa-solid fa-spinner fa-spin"></i> Đang trích xuất & vector hóa...</span>
+              <span id="uploadPercentage">0%</span>
+            </div>
+            <div class="progress-bar-bg">
+              <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Document List Header -->
+        <div class="doc-list-header">
+          <div class="doc-list-title">
+            <span>Tài liệu đã nạp</span>
+            <span class="doc-count-pill" id="docCountPill">0</span>
+          </div>
+          <button class="refresh-docs-btn" id="refreshDocsBtn" title="Làm mới danh sách">
+            <i class="fa-solid fa-arrows-rotate"></i>
+          </button>
+        </div>
+
+        <!-- Document List Items -->
+        <div class="doc-list" id="docList">
+          <div class="empty-docs-state">
+            <i class="fa-solid fa-folder-open"></i>
+            <p>Chưa có tài liệu nào trong hệ thống</p>
+            <small>Hãy tải lên tài liệu để bắt đầu tra cứu</small>
+          </div>
+        </div>
+
+        <!-- Clear All Documents Button -->
+        <button class="btn-secondary-danger" id="clearAllDocsBtn">
+          <i class="fa-solid fa-trash-can"></i> Xóa toàn bộ tài liệu & vector
+        </button>
+      </div>
+
+      <!-- TAB 2: RAG CONFIGURATION -->
+      <div class="tab-content" id="settingsTab">
+        <div class="settings-group">
+          
+          <div class="setting-item">
+            <div class="setting-label-row">
+              <label for="topKSlider">Top-K Chunks trích xuất</label>
+              <span class="setting-val-badge" id="topKVal">4</span>
+            </div>
+            <input type="range" id="topKSlider" min="1" max="10" value="4" step="1">
+            <small class="setting-hint">Số lượng đoạn ngữ cảnh liên quan nhất được nạp vào LLM</small>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label-row">
+              <label for="chunkSizeSlider">Chunk Size (ký tự)</label>
+              <span class="setting-val-badge" id="chunkSizeVal">800</span>
+            </div>
+            <input type="range" id="chunkSizeSlider" min="300" max="2000" value="800" step="50">
+            <small class="setting-hint">Độ dài của mỗi đoạn khi chia nhỏ tài liệu</small>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label-row">
+              <label for="chunkOverlapSlider">Chunk Overlap (ký tự)</label>
+              <span class="setting-val-badge" id="chunkOverlapVal">150</span>
+            </div>
+            <input type="range" id="chunkOverlapSlider" min="0" max="400" value="150" step="25">
+            <small class="setting-hint">Độ chồng lặp giữa các chunk để giữ mạch ngữ cảnh</small>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label-row">
+              <label for="tempSlider">Temperature (Sáng tạo)</label>
+              <span class="setting-val-badge" id="tempVal">0.2</span>
+            </div>
+            <input type="range" id="tempSlider" min="0.0" max="1.0" value="0.2" step="0.05">
+            <small class="setting-hint">Mức độ tuân thủ tài liệu (0.0: Tuyệt đối chuẩn xác - 1.0: Đa dạng)</small>
+          </div>
+
+          <div class="setting-item toggle-item">
+            <div class="toggle-info">
+              <label>Cohere Reranking v3.5</label>
+              <small>Tái sắp xếp ngữ cảnh thông minh bằng Cross-Encoder</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="rerankToggle" checked>
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <div class="setting-item toggle-item">
+            <div class="toggle-info">
+              <label>Streaming Response (SSE)</label>
+              <small>Hiển thị câu trả lời dạng gõ chữ thời gian thực</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="streamingToggle" checked>
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+        </div>
+
+        <div class="model-info-box">
+          <div class="model-info-row">
+            <span><i class="fa-solid fa-microchip"></i> LLM:</span>
+            <strong>Google Gemini 2.5 Flash</strong>
+          </div>
+          <div class="model-info-row">
+            <span><i class="fa-solid fa-dna"></i> Embedding:</span>
+            <strong>text-embedding-004 (768d)</strong>
+          </div>
+          <div class="model-info-row">
+            <span><i class="fa-solid fa-database"></i> Vector Store:</span>
+            <strong>ChromaDB (Cosine HNSW)</strong>
+          </div>
+          <div class="model-info-row">
+            <span><i class="fa-solid fa-arrows-split-up-and-left"></i> Reranker:</span>
+            <strong>Cohere rerank-v3.5</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="health-indicator" id="healthIndicator">
+          <span class="health-dot online"></span>
+          <span class="health-text" id="healthText">Hệ thống sẵn sàng</span>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- MAIN CHAT INTERFACE -->
+    <main class="main-content">
+      
+      <!-- Top Navigation Bar -->
+      <header class="chat-header">
+        <div class="header-left">
+          <button class="icon-btn toggle-sidebar-btn" id="toggleSidebarBtn" title="Bật/Tắt sidebar">
+            <i class="fa-solid fa-bars-staggered"></i>
+          </button>
+          <div class="header-title">
+            <h1>RAG Document Q&A Assistant</h1>
+            <span class="status-badge"><i class="fa-solid fa-shield-halved"></i> Hallucination Guardrails On</span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="header-btn" id="exportChatBtn" title="Xuất nội dung trò chuyện">
+            <i class="fa-solid fa-download"></i> <span class="btn-text">Xuất Chat</span>
+          </button>
+          <button class="header-btn danger" id="clearChatBtn" title="Xóa lịch sử hội thoại">
+            <i class="fa-solid fa-broom"></i> <span class="btn-text">Xóa Hội Thoại</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Chat Message Thread -->
+      <div class="chat-messages-container" id="chatContainer">
+        
+        <!-- Welcome Hero View (Shown when message history is empty) -->
+        <div class="welcome-hero" id="welcomeHero">
+          <div class="hero-icon-container">
+            <div class="hero-icon-glow"></div>
+            <div class="hero-icon"><i class="fa-solid fa-book-atlas"></i></div>
+          </div>
+          <h2>Hỏi Đáp Thông Minh Dựa Trên Tài Liệu</h2>
+          <p class="hero-subtitle">
+            Hệ thống RAG nâng cao kết hợp <strong>ChromaDB Vector Store</strong>, <strong>Cohere Rerank v3.5</strong> và <strong>Google Gemini 2.5 Flash</strong>. 
+            Mọi câu trả lời đều được đối chiếu chặt chẽ và trích dẫn số trang chính xác.
+          </p>
+
+          <div class="starter-suggestions-title">
+            <i class="fa-solid fa-lightbulb"></i> Gợi ý câu hỏi mẫu:
+          </div>
+
+          <div class="suggestion-grid">
+            <button class="suggestion-chip" data-query="Sinh viên đi thực tập doanh nghiệp cần tích lũy tối thiểu bao nhiêu tín chỉ và thời gian bao lâu?">
+              <div class="chip-icon"><i class="fa-solid fa-briefcase"></i></div>
+              <div class="chip-content">
+                <strong>Quy chế thực tập doanh nghiệp</strong>
+                <span>Điều kiện số tín chỉ & thời lượng thực tập</span>
+              </div>
+            </button>
+
+            <button class="suggestion-chip" data-query="Điều kiện để được xét nhận học bổng khuyến khích học tập và mức thưởng tương ứng là gì?">
+              <div class="chip-icon"><i class="fa-solid fa-award"></i></div>
+              <div class="chip-content">
+                <strong>Học bổng & Học phí</strong>
+                <span>Tiêu chuẩn điểm GPA & điểm rèn luyện</span>
+              </div>
+            </button>
+
+            <button class="suggestion-chip" data-query="Quy định về thời hạn đóng học phí và các hình thức xử lý khi sinh viên nợ học phí?">
+              <div class="chip-icon"><i class="fa-solid fa-receipt"></i></div>
+              <div class="chip-content">
+                <strong>Quy định nợ học phí</strong>
+                <span>Thời hạn nộp và chế tài xử lý nợ học phí</span>
+              </div>
+            </button>
+
+            <button class="suggestion-chip" data-query="Quy trình cấp lại mật khẩu email sinh viên và hỗ trợ kỹ thuật CNTT của trường?">
+              <div class="chip-icon"><i class="fa-solid fa-headset"></i></div>
+              <div class="chip-content">
+                <strong>Dịch vụ & Thiết bị CNTT</strong>
+                <span>Kênh liên hệ phòng IT và cấp tài khoản</span>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Chat messages will be dynamically injected here -->
+        <div class="messages-list" id="messagesList"></div>
+
+      </div>
+
+      <!-- Chat Input Area -->
+      <footer class="chat-input-wrapper">
+        <div class="chat-input-card">
+          <textarea 
+            id="chatInput" 
+            placeholder="Nhập câu hỏi tra cứu theo tài liệu... (Shift + Enter để xuống dòng)"
+            rows="1"
+          ></textarea>
+          
+          <div class="input-actions-bar">
+            <div class="input-hints">
+              <span class="hint-tag"><i class="fa-solid fa-quote-left"></i> Trích dẫn chính xác</span>
+              <span class="hint-tag"><i class="fa-solid fa-lock"></i> Chống bịa đặt (Zero Hallucination)</span>
+            </div>
+
+            <div class="input-btns">
+              <button class="send-btn" id="sendBtn" title="Gửi câu hỏi (Enter)">
+                <i class="fa-solid fa-paper-plane"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="footer-copyright">
+          <span>RAG Document Q&A Assistant • ChromaDB + Gemini 2.5 Flash + Cohere Rerank</span>
+        </div>
+      </footer>
+
+    </main>
+
+  </div>
+
+  <!-- Toast Notification System -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Application Logic Script -->
+  <script src="./app.js"></script>
+</body>
+</html>

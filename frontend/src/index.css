@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#09090b] text-slate-100 font-sans transition-colors duration-200;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  html.light body {
+    @apply bg-slate-50 text-slate-900;
+  }
+}
+
+/* Custom Scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.5);
+}
+
+/* Light mode scrollbar */
+html.light .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+}
+
+/* Code block highlight theme adjustments */
+pre code.hljs {
+  background-color: transparent !important;
+  padding: 0 !important;
+  color: inherit;
+}
+
+.hljs-keyword, .hljs-selector-tag {
+  color: #818cf8;
+}
+
+.hljs-string, .hljs-title {
+  color: #34d399;
+}
+
+.hljs-number, .hljs-literal {
+  color: #fbbf24;
+}
+
+.hljs-comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+/* Pulse shimmer for skeletons */
+@keyframes shimmerPulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.animate-shimmer-pulse {
+  animation: shimmerPulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
