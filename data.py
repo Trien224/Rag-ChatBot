@@ -67,6 +67,18 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
+
+        # 5. Bảng lưu câu hỏi gợi ý tự động (Suggested Questions / Pre-generated FAQs)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suggested_questions (
+                question_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL,
+                question_text TEXT NOT NULL,
+                pre_computed_answer TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (doc_id) REFERENCES documents (doc_id) ON DELETE CASCADE
+            )
+        ''')
         
         # Thêm user mặc định nếu bảng trống
         cursor.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (1, 'default_user', 'user')")
@@ -209,6 +221,61 @@ def get_system_stats() -> Dict[str, Any]:
             "total_queries": total_queries,
             "average_latency_seconds": avg_latency
         }
+
+def save_suggested_questions(doc_id: int, questions_list: List[Any]):
+    """Lưu danh sách câu hỏi gợi ý tự động sinh từ tài liệu vào SQLite."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        for q in questions_list:
+            if isinstance(q, dict):
+                q_text = str(q.get("question", "") or q.get("question_text", "")).strip()
+                q_ans = q.get("answer") or q.get("pre_computed_answer")
+            else:
+                q_text = str(q).strip()
+                q_ans = None
+            if q_text:
+                cursor.execute('''
+                    INSERT INTO suggested_questions (doc_id, question_text, pre_computed_answer)
+                    VALUES (?, ?, ?)
+                ''', (doc_id, q_text, q_ans))
+        conn.commit()
+
+def get_suggested_questions(limit: int = 6) -> List[Dict[str, Any]]:
+    """Lấy danh sách câu hỏi gợi ý từ các tài liệu đã nạp."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT sq.question_id, sq.doc_id, sq.question_text, sq.pre_computed_answer, sq.created_at, d.filename
+            FROM suggested_questions sq
+            LEFT JOIN documents d ON sq.doc_id = d.doc_id
+            ORDER BY sq.question_id DESC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def get_suggested_questions_by_doc(doc_id: int) -> List[Dict[str, Any]]:
+    """Lấy câu hỏi gợi ý theo doc_id cụ thể."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT question_id, doc_id, question_text, pre_computed_answer, created_at
+            FROM suggested_questions
+            WHERE doc_id = ?
+            ORDER BY question_id ASC
+        ''', (doc_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def clear_suggested_questions(doc_id: int = None):
+    """Xóa câu hỏi gợi ý của một tài liệu hoặc toàn bộ."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if doc_id:
+            cursor.execute('DELETE FROM suggested_questions WHERE doc_id = ?', (doc_id,))
+        else:
+            cursor.execute('DELETE FROM suggested_questions')
+        conn.commit()
 
 if __name__ == "__main__":
     init_db()

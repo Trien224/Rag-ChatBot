@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ArrowDown } from 'lucide-react';
 import { 
   ChatMessage, 
   ChatSession, 
@@ -49,7 +50,8 @@ export const App: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     try {
       const savedTheme = localStorage.getItem('rag_theme');
-      return savedTheme ? savedTheme === 'dark' : true;
+      if (savedTheme) return savedTheme === 'dark';
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     } catch {
       return true;
     }
@@ -126,6 +128,7 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   // Toasts
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -133,8 +136,10 @@ export const App: React.FC = () => {
   // Refs
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isAutoScrollPausedRef = useRef(false);
 
-  // Apply Dark/Light theme class to html
+  // Apply Dark/Light theme class to html root
   useEffect(() => {
     try {
       if (isDarkMode) {
@@ -196,30 +201,50 @@ export const App: React.FC = () => {
     }
   }, [settings]);
 
-  // Toast Helper
-  const addToast = (type: ToastMessage['type'], message: string) => {
+  // Toast Helpers
+  const addToast = useCallback((type: ToastMessage['type'], message: string) => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts((prev) => [...prev, { id, type, message }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4000);
-  };
+  }, []);
 
-  const removeToast = (id: string) => {
+  const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Theme toggle
+  const handleToggleTheme = useCallback(() => {
+    setIsDarkMode((prev) => !prev);
+  }, []);
+
+  // Handle Scroll and Scroll-to-bottom
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+    const isNearBottom = distanceToBottom < 120;
+    isAutoScrollPausedRef.current = !isNearBottom;
+    setShowScrollBottom(!isNearBottom);
   };
 
-  // Scroll to bottom
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+      setShowScrollBottom(false);
+      isAutoScrollPausedRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [currentMessages, isLoading]);
+    if (!isAutoScrollPausedRef.current) {
+      scrollToBottom();
+    }
+  }, [currentMessages, isLoading, scrollToBottom]);
 
   // Load API Data if online
-  const loadSystemData = async () => {
+  const loadSystemData = useCallback(async () => {
     try {
       const [h, s, docs] = await Promise.allSettled([
         fetchHealth(),
@@ -230,7 +255,6 @@ export const App: React.FC = () => {
       if (h.status === 'fulfilled') setHealth(h.value);
       if (s.status === 'fulfilled') setStats(s.value);
       if (docs.status === 'fulfilled' && docs.value && docs.value.length > 0) {
-        // Merge with status
         const formatted = docs.value.map((d) => ({
           ...d,
           status: 'indexed' as const,
@@ -240,14 +264,14 @@ export const App: React.FC = () => {
     } catch {
       // Offline fallback mode
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadSystemData();
-  }, []);
+  }, [loadSystemData]);
 
   // Handle Create New Chat Session
-  const handleNewChat = () => {
+  const handleNewChat = useCallback(() => {
     const newId = `session-${Date.now()}`;
     const newSession: ChatSession = {
       id: newId,
@@ -261,18 +285,44 @@ export const App: React.FC = () => {
     setMessagesMap((prev) => ({ ...prev, [newId]: [] }));
     setCurrentSessionId(newId);
     addToast('info', 'Đã tạo đoạn chat mới.');
-  };
+  }, [addToast]);
+
+  // Global Keyboard Shortcuts (Ctrl+K, Escape, Ctrl+Shift+L)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+K / Cmd+K: New Chat
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        handleNewChat();
+      }
+      // Escape: Close open drawers / modals
+      if (e.key === 'Escape') {
+        setIsDocDrawerOpen(false);
+        setIsSettingsOpen(false);
+        setIsSourceDrawerOpen(false);
+        setIsSidebarOpen(false);
+      }
+      // Ctrl+Shift+L: Toggle Theme
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        handleToggleTheme();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [handleNewChat, handleToggleTheme]);
 
   // Handle Rename Session
-  const handleRenameSession = (id: string, newTitle: string) => {
+  const handleRenameSession = useCallback((id: string, newTitle: string) => {
     setSessions((prev) =>
       prev.map((s) => (s.id === id ? { ...s, title: newTitle, updated_at: new Date().toISOString() } : s))
     );
     addToast('success', 'Đã đổi tên đoạn chat.');
-  };
+  }, [addToast]);
 
   // Handle Delete Session
-  const handleDeleteSession = (id: string) => {
+  const handleDeleteSession = useCallback((id: string) => {
     const sessionToDelete = sessions.find((s) => s.id === id);
     if (!sessionToDelete) return;
 
@@ -294,17 +344,16 @@ export const App: React.FC = () => {
       }
       addToast('info', 'Đã xóa đoạn chat.');
     }
-  };
+  }, [sessions, currentSessionId, handleNewChat, addToast]);
 
   // Handle Document Upload
-  const handleUpload = async (files: File[]) => {
+  const handleUpload = useCallback(async (files: File[]) => {
     if (!files.length) return;
     setIsUploading(true);
     setUploadProgress(0);
 
-    // Add temporary processing docs
     const newDocItems: DocumentItem[] = files.map((file) => ({
-      id: `doc-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       filename: file.name,
       file_size: file.size,
       file_type: file.name.split('.').pop()?.toLowerCase() || 'txt',
@@ -317,17 +366,15 @@ export const App: React.FC = () => {
     setDocuments((prev) => [...newDocItems, ...prev]);
 
     try {
-      // Try backend upload
       await uploadDocuments(files, (percent) => {
         setUploadProgress(percent);
       });
-      // Set to indexed
       setDocuments((prev) =>
         prev.map((d) => (newDocItems.some((n) => n.id === d.id) ? { ...d, status: 'indexed' } : d))
       );
       addToast('success', `Đã nạp thành công ${files.length} tài liệu vào ChromaDB!`);
       await loadSystemData();
-    } catch (err: any) {
+    } catch {
       // Offline fallback: simulate vector indexing
       setTimeout(() => {
         setDocuments((prev) =>
@@ -339,25 +386,24 @@ export const App: React.FC = () => {
       setIsUploading(false);
       setUploadProgress(0);
     }
-  };
+  }, [addToast, loadSystemData]);
 
   // Handle Delete Document
-  const handleDeleteDocument = async (filename: string) => {
+  const handleDeleteDocument = useCallback(async (filename: string) => {
     if (!confirm(`Bạn có chắc muốn xóa tài liệu "${filename}" khỏi kho RAG?`)) return;
     try {
       await deleteDocument(filename);
       setDocuments((prev) => prev.filter((d) => d.filename !== filename));
       addToast('success', `Đã xóa tài liệu "${filename}".`);
       await loadSystemData();
-    } catch (err: any) {
-      // Offline fallback
+    } catch {
       setDocuments((prev) => prev.filter((d) => d.filename !== filename));
       addToast('success', `Đã xóa tài liệu "${filename}".`);
     }
-  };
+  }, [addToast, loadSystemData]);
 
   // Handle Clear All Documents
-  const handleClearAllDocs = async () => {
+  const handleClearAllDocs = useCallback(async () => {
     if (!confirm('Bạn có chắc chắn muốn XÓA TOÀN BỘ tài liệu trong kho tri thức?')) return;
     try {
       await clearSystem('documents');
@@ -368,17 +414,17 @@ export const App: React.FC = () => {
       setDocuments([]);
       addToast('success', 'Đã dọn dẹp toàn bộ tài liệu.');
     }
-  };
+  }, [addToast, loadSystemData]);
 
   // Open Citation Drawer
-  const handleOpenSourceModal = (sources: SourceItem[], index: number) => {
+  const handleOpenSourceModal = useCallback((sources: SourceItem[], index: number) => {
     setActiveSources(sources);
     setActiveSourceIndex(index);
     setIsSourceDrawerOpen(true);
-  };
+  }, []);
 
   // Message Feedback
-  const handleFeedback = (messageId: string, feedback: 'like' | 'dislike') => {
+  const handleFeedback = useCallback((messageId: string, feedback: 'like' | 'dislike') => {
     setMessagesMap((prev) => ({
       ...prev,
       [currentSessionId]: (prev[currentSessionId] || []).map((m) =>
@@ -386,14 +432,15 @@ export const App: React.FC = () => {
       ),
     }));
     addToast('success', feedback === 'like' ? 'Cảm ơn bạn đã đánh giá tốt!' : 'Cảm ơn phản hồi! Chúng tôi sẽ cải thiện.');
-  };
+  }, [currentSessionId, addToast]);
 
   // Handle Send Message
-  const handleSendMessage = async (queryText?: string, attachments?: ChatAttachment[]) => {
+  const handleSendMessage = useCallback(async (queryText?: string, attachments?: ChatAttachment[]) => {
     const text = (queryText || inputQuery).trim();
     if ((!text && (!attachments || attachments.length === 0)) || isLoading) return;
 
     setInputQuery('');
+    isAutoScrollPausedRef.current = false;
 
     // Update session title if first message
     const currentMsgs = messagesMap[currentSessionId] || [];
@@ -440,7 +487,6 @@ export const App: React.FC = () => {
     const startTime = Date.now();
 
     try {
-      // Attempt live API query
       await queryRAGStream(
         text,
         settings,
@@ -507,7 +553,6 @@ export const App: React.FC = () => {
         const mockResult = generateMockRagAnswer(text, documents);
         sourcesResult = mockResult.sources;
 
-        // Show thinking for 600ms
         await new Promise((r) => setTimeout(r, 600));
         setMessagesMap((prev) => ({
           ...prev,
@@ -516,7 +561,6 @@ export const App: React.FC = () => {
           ),
         }));
 
-        // Simulate typing animation
         const tokens = mockResult.answer.split(/(\s+)/);
         let streamText = '';
 
@@ -553,35 +597,35 @@ export const App: React.FC = () => {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
-  };
+  }, [inputQuery, isLoading, messagesMap, currentSessionId, settings, documents, addToast]);
 
   // Stop Generation
-  const handleStopGeneration = () => {
+  const handleStopGeneration = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
-  };
+  }, []);
 
   // Regenerate last message
-  const handleRegenerate = () => {
+  const handleRegenerate = useCallback(() => {
     const msgs = messagesMap[currentSessionId] || [];
     const lastUserMsg = [...msgs].reverse().find((m) => m.role === 'user');
     if (lastUserMsg) {
       handleSendMessage(lastUserMsg.content, lastUserMsg.attachments);
     }
-  };
+  }, [messagesMap, currentSessionId, handleSendMessage]);
 
   // Clear Chat in Current Session
-  const handleClearChat = () => {
+  const handleClearChat = useCallback(() => {
     if (currentMessages.length === 0) return;
     if (confirm('Bạn có muốn xóa toàn bộ tin nhắn trong phiên trò chuyện này?')) {
       setMessagesMap((prev) => ({ ...prev, [currentSessionId]: [] }));
       addToast('info', 'Đã xóa đoạn hội thoại.');
     }
-  };
+  }, [currentMessages.length, currentSessionId, addToast]);
 
   // Export Chat to Markdown
-  const handleExportChat = () => {
+  const handleExportChat = useCallback(() => {
     if (currentMessages.length === 0) return;
 
     const currentSession = sessions.find((s) => s.id === currentSessionId);
@@ -611,12 +655,12 @@ export const App: React.FC = () => {
     a.click();
     URL.revokeObjectURL(url);
     addToast('success', 'Đã xuất đoạn hội thoại thành tệp Markdown!');
-  };
+  }, [currentMessages, sessions, currentSessionId, addToast]);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-dark-950 font-sans text-slate-100 transition-colors duration-200">
+    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-dark-950 font-sans text-slate-900 dark:text-slate-100 transition-colors duration-200">
       {/* Toast Notification Container */}
       <Toast toasts={toasts} onDismiss={removeToast} />
 
@@ -636,7 +680,7 @@ export const App: React.FC = () => {
         onOpenDocumentDrawer={() => setIsDocDrawerOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         isDarkMode={isDarkMode}
-        onToggleTheme={() => setIsDarkMode(!isDarkMode)}
+        onToggleTheme={handleToggleTheme}
         stats={stats}
         health={health}
       />
@@ -658,11 +702,15 @@ export const App: React.FC = () => {
           messageCount={currentMessages.length}
           docCount={documents.length}
           isDarkMode={isDarkMode}
-          onToggleTheme={() => setIsDarkMode(!isDarkMode)}
+          onToggleTheme={handleToggleTheme}
         />
 
         {/* Message Thread Area */}
-        <div className="flex-1 overflow-y-auto p-3 sm:p-6 custom-scrollbar">
+        <div 
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="relative flex-1 overflow-y-auto p-3 sm:p-6 custom-scrollbar"
+        >
           {currentMessages.length === 0 ? (
             <WelcomeHero
               onSelectPrompt={(prompt) => handleSendMessage(prompt)}
@@ -684,6 +732,17 @@ export const App: React.FC = () => {
               ))}
               <div ref={messagesEndRef} />
             </div>
+          )}
+
+          {/* Floating Scroll to Bottom Button */}
+          {showScrollBottom && currentMessages.length > 0 && (
+            <button
+              onClick={() => scrollToBottom(true)}
+              className="sticky bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white dark:bg-dark-850 text-indigo-600 dark:text-indigo-400 border border-slate-200 dark:border-slate-700 text-xs font-medium shadow-lg hover:shadow-xl transition-all animate-fade-in hover:scale-105"
+            >
+              <ArrowDown className="w-3.5 h-3.5" />
+              <span>Cuộn xuống dưới</span>
+            </button>
           )}
         </div>
 

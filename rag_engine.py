@@ -148,12 +148,13 @@ class RAGEngine:
     def get_embedding(self, text: str) -> List[float]:
         """Tạo embedding vector cho đoạn văn bản sử dụng Google Gemini embedding."""
         if not self.gemini_client:
-            raise ValueError("GEMINI_API_KEY chưa được cấu hình trong .env")
+            raise ValueError("GEMINI_API_KEY / GEMINI_KEYS chưa được cấu hình trong .env")
         
-        embed_models = ["gemini-embedding-001", "gemini-embedding-2", "text-embedding-004"]
+        embed_models = ["gemini-embedding-001", "gemini-embedding-2"]
         last_err = None
 
         for attempt in range(len(self.gemini_keys) or 1):
+            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
             for model_name in embed_models:
                 try:
                     res = self.gemini_client.models.embed_content(
@@ -163,6 +164,7 @@ class RAGEngine:
                     return res.embeddings[0].values
                 except Exception as e:
                     last_err = e
+                    print(f"[GEMINI EMBED ERROR] Key index {self.current_key_idx} ({current_key[:6]}...) | Model '{model_name}' failed: {type(e).__name__}: {e}")
                     continue
             
             self._rotate_key_if_needed()
@@ -228,12 +230,38 @@ class RAGEngine:
         return pages_content
 
     def ingest_file(self, file_path: str, original_filename: Optional[str] = None,
-                    chunk_size: int = 800, chunk_overlap: int = 150) -> Dict[str, Any]:
+                    chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False) -> Dict[str, Any]:
         """
         Nạp tài liệu, chia đoạn theo RecursiveCharacterTextSplitter, tạo embeddings và lưu vào ChromaDB + SQLite.
+        Tự động kiểm tra trùng lặp: nếu tài liệu đã tồn tại trong SQLite/ChromaDB thì bỏ qua để tối ưu hiệu năng.
         """
         if original_filename is None:
             original_filename = os.path.basename(file_path)
+
+        # 0. Kiểm tra trùng lặp nếu không yêu cầu nạp đè (force_reload=False)
+        if not force_reload:
+            try:
+                with database.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT doc_id, total_pages FROM documents WHERE filename = ?", (original_filename,))
+                    existing_doc = cursor.fetchone()
+                    if existing_doc:
+                        cursor.execute("SELECT COUNT(*) as cnt FROM document_chunks WHERE doc_id = ?", (existing_doc["doc_id"],))
+                        chunk_cnt = cursor.fetchone()["cnt"]
+                        if chunk_cnt > 0:
+                            # Đảm bảo tài liệu đã có câu hỏi gợi ý FAQs
+                            existing_faqs = database.get_suggested_questions_by_doc(existing_doc["doc_id"])
+                            if not existing_faqs:
+                                self.generate_faqs_for_pdf(file_path, existing_doc["doc_id"])
+                            return {
+                                "filename": original_filename,
+                                "chunks_count": chunk_cnt,
+                                "pages_count": existing_doc["total_pages"],
+                                "status": "already_indexed",
+                                "message": f"Tài liệu '{original_filename}' đã được đánh chỉ mục ({chunk_cnt} chunks), bỏ qua bước trích xuất & embedding."
+                            }
+            except Exception as e:
+                print(f"[INGEST] Lưu ý khi kiểm tra trùng lặp: {e}")
 
         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
         pages_data = self.extract_text_from_file(file_path, original_filename)
@@ -318,15 +346,109 @@ class RAGEngine:
                     metadatas=all_metas[i:end_i]
                 )
 
+        # 4. Tự động sinh câu hỏi thường gặp FAQs cho tài liệu
+        generated_faqs = []
+        try:
+            generated_faqs = self.generate_faqs_for_pdf(file_path, doc_id)
+        except Exception as ex:
+            print(f"[FAQS] Lỗi tự động sinh câu hỏi FAQs: {ex}")
+
         return {
             "filename": original_filename,
             "chunks_count": len(all_ids),
             "pages_count": total_pages,
+            "faqs_count": len(generated_faqs),
             "status": "success"
         }
 
-    def ingest_docs_folder(self, folder_path: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150):
-        """Quét và nạp toàn bộ tài liệu có trong thư mục."""
+    def generate_faqs_for_pdf(self, file_path: str, doc_id: int) -> List[str]:
+        """
+        Tự động phân tích nội dung tài liệu và sinh danh sách 5-7 câu hỏi thường gặp (FAQs) quan trọng.
+        Lưu kết quả vào bảng suggested_questions trong SQLite.
+        """
+        try:
+            pages_data = self.extract_text_from_file(file_path, os.path.basename(file_path))
+        except Exception:
+            pages_data = []
+
+        if not pages_data:
+            return []
+
+        # Trích xuất khoảng 3500 ký tự đầu của tài liệu để nắm nội dung trọng tâm
+        sample_text = ""
+        for p in pages_data[:5]:
+            sample_text += f"\n--- Trang {p.get('page_number', 1)} ---\n" + p.get("text", "")
+            if len(sample_text) > 3500:
+                sample_text = sample_text[:3500]
+                break
+
+        if not sample_text.strip():
+            return []
+
+        prompt = f"""Bạn là Trợ lý Cố vấn Học vụ và Quy chế Đào tạo Nhà trường.
+Dựa vào nội dung tài liệu quy chế/hướng dẫn sau đây:
+\"\"\"
+{sample_text}
+\"\"\"
+
+Yêu cầu:
+Hãy trích xuất từ 5 đến 7 câu hỏi quan trọng, thực tế và phổ biến nhất mà sinh viên/người dùng có thể hỏi về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp trong tài liệu này.
+Mỗi câu hỏi phải ngắn gọn, súc tích, tự nhiên và sát với nội dung cốt lõi.
+
+Định dạng trả về BẮT BUỘC:
+Trả về DUY NHẤT một JSON Array các chuỗi câu hỏi (list of strings).
+Ví dụ:
+[
+  "Điều kiện để được xét học bổng khuyến khích học tập là gì?",
+  "Sinh viên cần tích lũy tối thiểu bao nhiêu tín chỉ để đi thực tập?",
+  "Thời gian và quy trình nộp đồ án tốt nghiệp như thế nào?"
+]
+Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào ngoài chuỗi JSON hợp lệ."""
+
+        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
+        faqs: List[str] = []
+
+        for attempt in range(len(self.gemini_keys) or 1):
+            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
+            for m_name in gen_models:
+                try:
+                    res = self.gemini_client.models.generate_content(
+                        model=m_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.3
+                        )
+                    )
+                    raw_text = res.text.strip()
+                    if "```json" in raw_text:
+                        raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in raw_text:
+                        raw_text = raw_text.split("```")[1].split("```")[0].strip()
+                    
+                    import json
+                    parsed = json.loads(raw_text)
+                    if isinstance(parsed, list):
+                        faqs = [str(q).strip() for q in parsed if str(q).strip()]
+                        break
+                except Exception as e:
+                    print(f"[GEMINI FAQS ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
+                    continue
+            if faqs:
+                break
+            self._rotate_key_if_needed()
+
+        if faqs:
+            database.clear_suggested_questions(doc_id)
+            database.save_suggested_questions(doc_id, faqs)
+
+        return faqs
+
+    def ingest_pdf(self, file_path: str, original_filename: Optional[str] = None) -> Dict[str, Any]:
+        """Wrapper nạp tài liệu PDF và tự động tạo FAQs."""
+        return self.ingest_file(file_path, original_filename)
+
+    def ingest_docs_folder(self, folder_path: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False):
+        """Quét và nạp toàn bộ tài liệu có trong thư mục (tự động bỏ qua file đã có trong DB)."""
         if not os.path.exists(folder_path):
             return []
         
@@ -335,7 +457,7 @@ class RAGEngine:
             ext = os.path.splitext(file)[1].lower()
             if ext in [".pdf", ".docx", ".doc", ".txt", ".md"]:
                 full_path = os.path.join(folder_path, file)
-                res = self.ingest_file(full_path, original_filename=file, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                res = self.ingest_file(full_path, original_filename=file, chunk_size=chunk_size, chunk_overlap=chunk_overlap, force_reload=force_reload)
                 results.append(res)
         return results
 
@@ -361,19 +483,19 @@ class RAGEngine:
         database.delete_all_document_records()
         return True
 
-    def retrieve(self, query_text: str, top_k: int = 4, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
+    def retrieve(self, query_text: str, top_k: int = 2, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
-        Semantic Retrieval:
-        1. Embeds query -> queries ChromaDB for candidates (k * 2)
-        2. Reranks candidates using Cohere Rerank if enabled and key available
-        3. Returns top_k documents and metadata
+        Semantic Retrieval tối ưu:
+        1. Embeds query -> query ChromaDB với n_results=4 (tinh gọn từ 6 xuống 4).
+        2. Reranks candidates sử dụng Cohere Rerank lấy Top-2 (top_n=2) đoạn có độ liên quan cao nhất để giảm tải prompt LLM.
+        3. Trả về danh sách docs và metadata tương ứng.
         """
         q_embed = self.get_embedding(query_text)
         
-        fetch_k = min(max(top_k * 2, 6), 25)
+        # Lấy tinh gọn 4 chunks từ ChromaDB
         search_results = self.collection.query(
             query_embeddings=[q_embed],
-            n_results=fetch_k
+            n_results=4
         )
         
         docs = search_results["documents"][0] if (search_results and search_results["documents"]) else []
@@ -383,22 +505,22 @@ class RAGEngine:
         if not docs:
             return [], []
 
-        # Add distance/similarity score to metadata
+        # Gán similarity/distance vào metadata
         for idx, m in enumerate(metas):
             if idx < len(distances):
-                # Cosine distance to similarity (approx)
                 m["distance"] = round(float(distances[idx]), 4)
                 m["similarity"] = round(max(0.0, 1.0 - float(distances[idx])), 4)
             m["content_snippet"] = docs[idx][:200] + ("..." if len(docs[idx]) > 200 else "")
 
-        # Rerank with Cohere if available
+        # Rerank với Cohere (lấy Top-2 có độ liên quan cao nhất)
         if use_rerank and self.cohere_client and len(docs) > 1:
             try:
+                target_top_n = min(top_k, 2, len(docs))
                 rerank_resp = self.cohere_client.rerank(
                     model="rerank-v3.5",
                     query=query_text,
                     documents=docs,
-                    top_n=min(top_k, len(docs))
+                    top_n=target_top_n
                 )
                 ranked_docs = []
                 ranked_metas = []
@@ -412,12 +534,12 @@ class RAGEngine:
             except Exception as e:
                 print(f"Cohere rerank fallback to cosine: {e}")
 
-        # Default top_k from vector search
+        # Mặc định lấy top_k (mặc định 2) từ vector search
         return docs[:top_k], metas[:top_k]
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
         """
-        Constructs context-augmented prompt with strict hallucination guardrails.
+        Constructs context-augmented prompt specifically for University Academic Regulations with strict guardrails.
         """
         context_blocks = []
         for i, doc in enumerate(retrieved_docs, 1):
@@ -425,13 +547,15 @@ class RAGEngine:
         
         context_str = "\n\n".join(context_blocks)
 
-        prompt = f"""Bạn là một Trợ lý AI Chuyên gia Phân tích và Tra cứu Tài liệu (RAG Document Assistant).
+        prompt = f"""Bạn là Trợ lý Tra cứu Nội quy và Quy chế Đào tạo của Nhà trường.
+Bạn CHỈ trả lời các câu hỏi liên quan đến quy chế học vụ, điểm số, học phí, rèn luyện, học bổng, thực tập, đồ án tốt nghiệp và nội quy chung dựa TUYỆT ĐỐI vào [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
 
-NGUYÊN TẮC VÀ RÀNG BUỘC NGHIÊM NGẶT (HALLUCINATION GUARDRAILS):
-1. Bạn CHỈ ĐƯỢC PHÉP trả lời dựa TUYỆT ĐỐI vào thông tin có trong phần [NGỮ CẢNH TÀI LIỆU] dưới đây.
-2. Nếu câu trả lời KHÔNG có trong ngữ cảnh hoặc thông tin không đủ để khẳng định, bạn PHẢI trả lời rõ ràng: "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này." TUYỆT ĐỐI KHÔNG tự suy đoán, bịa đặt hoặc dùng kiến thức bên ngoài tài liệu.
-3. Trình bày câu trả lời rõ ràng, mạch lạc, sử dụng định dạng Markdown (gạch đầu dòng, bảng biểu, in đậm) nếu cần thiết để dễ đọc.
-4. Cuối câu trả lời, hãy tóm tắt ngắn gọn các nguồn đã tham chiếu.
+NGUYÊN TẮC VÀ RÀNG BUỘC NGHIÊM NGẶT:
+1. Bạn CHỈ ĐƯỢC PHÉP trả lời dựa vào thông tin có trong phần [NGỮ CẢNH TÀI LIỆU] dưới đây.
+2. Nếu câu hỏi KHÔNG liên quan đến quy chế nhà trường (như hỏi về tài chính doanh nghiệp, đầu tư, code bên ngoài, kiến thức tổng quát ngoài trường học...), hãy lịch sự từ chối và hướng dẫn người dùng: "Tôi là Trợ lý Tra cứu Nội quy và Quy chế Đào tạo của Nhà trường. Tôi chỉ hỗ trợ giải đáp các vấn đề liên quan đến quy chế học vụ, học phí, học bổng, thực tập, điểm số và nội quy sinh viên. Vui lòng đặt câu hỏi liên quan đến các chủ đề này."
+3. Nếu câu hỏi liên quan đến quy chế nhưng thông tin KHÔNG có trong tài liệu được cung cấp, bạn PHẢI trả lời rõ ràng: "Dựa trên các tài liệu quy chế được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này." TUYỆT ĐỐI KHÔNG tự suy đoán, bịa đặt hoặc dùng kiến thức bên ngoài tài liệu.
+4. Trình bày câu trả lời rõ ràng, mạch lạc, sử dụng định dạng Markdown (gạch đầu dòng, bảng biểu, in đậm số liệu/mốc thời gian quan trọng) để người đọc dễ theo dõi.
+5. Cuối câu trả lời, hãy tóm tắt ngắn gọn các nguồn tài liệu quy chế và số trang đã tham chiếu.
 
 [NGỮ CẢNH TÀI LIỆU]:
 {context_str}
@@ -442,7 +566,7 @@ NGUYÊN TẮC VÀ RÀNG BUỘC NGHIÊM NGẶT (HALLUCINATION GUARDRAILS):
 CÂU TRẢ LỜI:"""
         return prompt
 
-    def query(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2) -> Tuple[str, List[Dict[str, Any]], float]:
+    def query(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2) -> Tuple[str, List[Dict[str, Any]], float]:
         """
         Truy vấn RAG dạng Batch JSON, trả về (câu trả lời, nguồn trích dẫn, latency).
         """
@@ -451,16 +575,17 @@ CÂU TRẢ LỜI:"""
         
         if not docs:
             latency = round(time.time() - start_time, 2)
-            answer = "Dựa trên các tài liệu hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Bạn vui lòng tải lên tài liệu liên quan hoặc đặt câu hỏi khác."
+            answer = "Dựa trên các tài liệu quy chế hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Vui lòng đặt câu hỏi liên quan đến quy chế học vụ hoặc tải lên tài liệu mới."
             database.log_chat_interaction(question, answer, sources, latency, search_type="none")
             return answer, [], latency
 
         prompt = self.build_prompt(question, docs)
         
-        gen_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
         answer = ""
 
         for attempt in range(len(self.gemini_keys) or 1):
+            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
             for m_name in gen_models:
                 try:
                     response = self.gemini_client.models.generate_content(
@@ -473,30 +598,33 @@ CÂU TRẢ LỜI:"""
                     answer = response.text
                     break
                 except Exception as e:
-                    answer = f"Lỗi trong quá trình sinh câu trả lời: {e}"
+                    print(f"[GEMINI QUERY ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
+                    answer = f"Lỗi trong quá trình sinh câu trả lời: {type(e).__name__} - {e}"
             if answer and not answer.startswith("Lỗi trong quá trình"):
                 break
             self._rotate_key_if_needed()
 
         latency = round(time.time() - start_time, 2)
         
-        # Log SQLite
+        # Log SQLite sau khi hoàn thành
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
         database.log_chat_interaction(question, answer, sources, latency, search_type=search_type)
 
         return answer, sources, latency
 
-    def query_stream(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2) -> Generator[Dict[str, Any], None, None]:
+    def query_stream(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2) -> Generator[Dict[str, Any], None, None]:
         """
-        Streaming Generator for Server-Sent Events (SSE).
-        Yields source metadata first, then stream tokens, then completion event.
+        Streaming Generator for Fast Response (Server-Sent Events & Streamlit).
+        1. Gửi metadata nguồn trích dẫn ngay lập tức.
+        2. Dùng generate_content_stream() để sinh từng token (giảm latency cảm nhận < 1s).
+        3. Ghi log SQLite sau khi đã hoàn tất toàn bộ stream ra cho người dùng để không gây nghẽn.
         """
         start_time = time.time()
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
         
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
 
-        # Emit sources first
+        # Emit sources first (không chờ)
         yield {
             "type": "sources",
             "sources": sources,
@@ -505,21 +633,23 @@ CÂU TRẢ LỜI:"""
         }
 
         if not docs:
-            msg = "Dựa trên các tài liệu hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Vui lòng tải lên tài liệu liên quan để tra cứu."
+            msg = "Dựa trên các tài liệu quy chế hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Vui lòng đặt câu hỏi liên quan đến quy chế học vụ hoặc tải lên tài liệu mới."
             for word in msg.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
             latency = round(time.time() - start_time, 2)
+            # Log sau khi stream xong
             database.log_chat_interaction(question, msg, sources, latency, search_type="none")
             yield {"type": "done", "latency": latency}
             return
 
         prompt = self.build_prompt(question, docs)
         full_answer = ""
-        gen_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
         stream_success = False
 
         for attempt in range(len(self.gemini_keys) or 1):
+            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
             for m_name in gen_models:
                 try:
                     response_stream = self.gemini_client.models.generate_content_stream(
@@ -537,16 +667,18 @@ CÂU TRẢ LỜI:"""
                     stream_success = True
                     break
                 except Exception as e:
+                    print(f"[GEMINI STREAM ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
                     continue
             if stream_success:
                 break
             self._rotate_key_if_needed()
 
         if not stream_success:
-            error_msg = "\n[Lỗi kết nối Gemini: Không thể sinh phản hồi từ API]"
+            error_msg = "\n[Lỗi kết nối Gemini: Không thể sinh phản hồi từ API. Vui lòng kiểm tra lại GEMINI_KEYS trong .env]"
             full_answer += error_msg
             yield {"type": "token", "token": error_msg}
 
         latency = round(time.time() - start_time, 2)
+        # Ghi log SQLite sau khi đã hoàn thành stream ra màn hình cho người dùng
         database.log_chat_interaction(question, full_answer, sources, latency, search_type=search_type)
-        yield {"type": "done", "latency": latency}
+        yield {"type": "done", "latency": latency, "full_text": full_answer}

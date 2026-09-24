@@ -3,13 +3,21 @@
 @tailwind utilities;
 
 @layer base {
-  body {
-    @apply bg-[#09090b] text-slate-100 font-sans transition-colors duration-200;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  :root {
+    color-scheme: dark light;
   }
 
-  html.light body {
-    @apply bg-slate-50 text-slate-900;
+  html.dark {
+    color-scheme: dark;
+  }
+
+  html.light {
+    color-scheme: light;
+  }
+
+  body {
+    @apply bg-slate-50 dark:bg-[#09090b] text-slate-900 dark:text-slate-100 font-sans transition-colors duration-200 min-h-screen overflow-hidden;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 }
 
@@ -24,7 +32,7 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.2);
+  background: rgba(148, 163, 184, 0.25);
   border-radius: 9999px;
 }
 
@@ -32,9 +40,12 @@
   background: rgba(99, 102, 241, 0.5);
 }
 
-/* Light mode scrollbar */
 html.light .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.3);
+  background: rgba(148, 163, 184, 0.45);
+}
+
+html.light .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.6);
 }
 
 /* Code block highlight theme adjustments */
@@ -61,7 +72,7 @@ pre code.hljs {
   font-style: italic;
 }
 
-/* Pulse shimmer for skeletons */
+/* Shimmer animation */
 @keyframes shimmerPulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 0.8; }
@@ -70,3 +81,4 @@ pre code.hljs {
 .animate-shimmer-pulse {
   animation: shimmerPulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+

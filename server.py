@@ -106,6 +106,14 @@ async def list_documents():
     return {"documents": docs, "total": len(docs)}
 
 
+@app.get("/api/faqs")
+@app.get("/api/suggested-questions")
+async def get_faqs(limit: int = Query(6, ge=1, le=50)):
+    """Lấy danh sách câu hỏi gợi ý FAQs tự động sinh từ tài liệu."""
+    faqs = database.get_suggested_questions(limit=limit)
+    return {"faqs": faqs, "total": len(faqs)}
+
+
 @app.post("/api/upload")
 async def upload_documents(
     files: List[UploadFile] = File(...),
