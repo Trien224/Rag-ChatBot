@@ -1,17 +1,17 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { 
-  Sparkles, 
+  Sparkles,
   TrendingUp, 
   Users, 
   GraduationCap, 
   ShieldCheck, 
   UploadCloud, 
-  Layers, 
   ArrowRight,
   RefreshCw,
   CheckCircle2
 } from 'lucide-react';
+import { NtuEduBotIcon } from './NtuBotIcon';
 
 interface WelcomeHeroProps {
   onSelectPrompt: (prompt: string) => void;
@@ -84,19 +84,19 @@ export const WelcomeHero: React.FC<WelcomeHeroProps> = React.memo(({
     <div className="max-w-3xl mx-auto py-6 sm:py-10 px-4 flex flex-col items-center text-center space-y-6 select-none">
       {/* Glowing Hero Icon */}
       <div className="relative">
-        <div className="absolute -inset-3 bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-400 rounded-full blur-2xl opacity-30 animate-pulse-subtle" />
-        <div className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-3xl bg-white dark:bg-dark-900 border border-slate-200 dark:border-slate-700/80 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-xl">
-          <Layers className="w-8 h-8 sm:w-10 sm:h-10" />
+        <div className="absolute -inset-3 bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 rounded-full blur-2xl opacity-35 animate-pulse-subtle" />
+        <div className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-2xl sm:rounded-3xl bg-white dark:bg-dark-900 border border-slate-200 dark:border-slate-700/80 flex items-center justify-center shadow-xl p-2.5">
+          <NtuEduBotIcon className="w-full h-full" />
         </div>
       </div>
 
       {/* Hero Headings */}
       <div className="space-y-2 max-w-xl">
         <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white font-display tracking-tight">
-          Hỏi Đáp & Tra Cứu Tài Liệu Thông Minh
+          Chào mừng đến với NTU EduBot
         </h2>
         <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-          Trợ lý RAG thông minh phong cách <strong className="text-slate-900 dark:text-slate-200">ChatGPT & Perplexity</strong>. Mọi câu trả lời đều được truy xuất chính xác từ tài liệu, đính kèm số trang và đoạn trích văn bản gốc.
+          Trợ lý AI hỗ trợ tra cứu quy chế, thông tin học vụ và tài liệu giảng dạy thông minh NTU. Mọi câu trả lời được đối chiếu chính xác và trích dẫn số trang trực tiếp từ tài liệu.
         </p>
       </div>
 

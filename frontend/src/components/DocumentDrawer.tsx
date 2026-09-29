@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { DocumentItem } from '../types/rag';
 import { formatBytes } from '../utils/formatters';
+import { DocumentDeleteModal } from './DocumentDeleteModal';
 
 interface DocumentDrawerProps {
   isOpen: boolean;
@@ -40,6 +41,8 @@ export const DocumentDrawer: React.FC<DocumentDrawerProps> = React.memo(({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [docToDelete, setDocToDelete] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Close on Escape key
   useEffect(() => {
@@ -279,7 +282,7 @@ export const DocumentDrawer: React.FC<DocumentDrawerProps> = React.memo(({
                         </div>
 
                         <button
-                          onClick={() => onDeleteDocument(doc.filename)}
+                          onClick={() => setDocToDelete(doc.filename)}
                           className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 transition"
                           title="Xóa tài liệu khỏi RAG"
                         >
@@ -309,6 +312,25 @@ export const DocumentDrawer: React.FC<DocumentDrawerProps> = React.memo(({
               </button>
             </div>
           </motion.div>
+
+          {/* Custom Dark-Themed Document Deletion Confirmation Modal */}
+          <DocumentDeleteModal
+            isOpen={Boolean(docToDelete)}
+            onClose={() => setDocToDelete(null)}
+            filename={docToDelete || ''}
+            isDeleting={isDeleting}
+            onConfirm={async () => {
+              if (docToDelete) {
+                try {
+                  setIsDeleting(true);
+                  await onDeleteDocument(docToDelete);
+                } finally {
+                  setIsDeleting(false);
+                  setDocToDelete(null);
+                }
+              }
+            }}
+          />
         </>
       )}
     </AnimatePresence>

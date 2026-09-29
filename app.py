@@ -1,8 +1,9 @@
 import os
-import shutil
-import streamlit as st
 from pathlib import Path
+# pyrefly: ignore [missing-import]
+import streamlit as st
 from rag_engine import RAGEngine
+import database
 
 # Cấu hình trang giao diện
 st.set_page_config(
@@ -90,7 +91,6 @@ st.title("🎓 Trợ Lý Tra Cứu Nội Quy & Quy Chế Đào Tạo Nhà Trư�
 st.caption("Chuyên tra cứu Quy chế học vụ, Điểm số, Học phí, Học bổng, Thực tập, Đồ án tốt nghiệp | Gemini 2.5 Flash + Cohere Rerank")
 
 # Hiển thị các câu hỏi gợi ý thường gặp (Pre-generated FAQs)
-import database
 suggested_faqs = database.get_suggested_questions(limit=6)
 clicked_question = None
 
@@ -135,33 +135,34 @@ if user_query:
 
     # 2. Sinh câu trả lời dạng Streaming
     with st.chat_message("assistant"):
-        # Lưu biến tạm để chứa sources và latency trong quá trình stream
-        collected_sources = []
-        latency_val = 0.0
+        # Lưu container tạm để chứa sources và latency trong quá trình stream
+        stream_meta = {
+            "collected_sources": [],
+            "latency_val": 0.0
+        }
 
         def stream_generator():
-            nonlocal collected_sources, latency_val
             for event in rag.query_stream(user_query, top_k=2, use_rerank=True):
                 evt_type = event.get("type")
                 if evt_type == "sources":
-                    collected_sources = event.get("sources", [])
+                    stream_meta["collected_sources"] = event.get("sources", [])
                 elif evt_type == "token":
                     yield event.get("token", "")
                 elif evt_type == "done":
-                    latency_val = event.get("latency", 0.0)
+                    stream_meta["latency_val"] = event.get("latency", 0.0)
 
         # Phát trực tiếp văn bản ra màn hình ngay khi AI sinh token
         full_response = st.write_stream(stream_generator())
 
         # Hiển thị thời gian phản hồi
-        if latency_val > 0:
-            st.caption(f"⚡ Tốc độ phản hồi: {latency_val:.2f}s | Tối ưu Perceived Latency < 1s")
+        if stream_meta["latency_val"] > 0:
+            st.caption(f"⚡ Tốc độ phản hồi: {stream_meta['latency_val']:.2f}s | Tối ưu Perceived Latency < 1s")
 
         # Hiển thị nguồn trích dẫn
-        if collected_sources:
+        if stream_meta["collected_sources"]:
             with st.expander("📍 Nguồn tham chiếu"):
                 seen = set()
-                for s in collected_sources:
+                for s in stream_meta["collected_sources"]:
                     key = f"{s.get('source')}_p{s.get('page')}"
                     if key not in seen:
                         st.write(f"- Tệp: **{s.get('source')}** (Trang {s.get('page')})")
@@ -171,6 +172,6 @@ if user_query:
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response,
-            "sources": collected_sources,
-            "latency": latency_val
+            "sources": stream_meta["collected_sources"],
+            "latency": stream_meta["latency_val"]
         })

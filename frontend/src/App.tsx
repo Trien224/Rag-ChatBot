@@ -35,6 +35,10 @@ import { Toast } from './components/Toast';
 import { SourceInspectorDrawer } from './components/SourceInspectorDrawer';
 import { DocumentDrawer } from './components/DocumentDrawer';
 import { RagSettingsModal } from './components/RagSettingsModal';
+import { ShareModal } from './components/ShareModal';
+import { RenameModal } from './components/RenameModal';
+import { DeleteConfirmModal } from './components/DeleteConfirmModal';
+import { exportChatToPdf, exportChatToDoc, exportChatToMarkdown } from './utils/exportUtils';
 
 const DEFAULT_SETTINGS: RagSettings = {
   top_k: 4,
@@ -65,6 +69,12 @@ export const App: React.FC = () => {
   const [isDocDrawerOpen, setIsDocDrawerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSourceDrawerOpen, setIsSourceDrawerOpen] = useState(false);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [targetShareSession, setTargetShareSession] = useState<ChatSession | null>(null);
+  const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+  const [targetRenameSession, setTargetRenameSession] = useState<ChatSession | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [targetDeleteSession, setTargetDeleteSession] = useState<ChatSession | null>(null);
   const [activeSources, setActiveSources] = useState<SourceItem[]>([]);
   const [activeSourceIndex, setActiveSourceIndex] = useState(0);
 
@@ -318,33 +328,54 @@ export const App: React.FC = () => {
     setSessions((prev) =>
       prev.map((s) => (s.id === id ? { ...s, title: newTitle, updated_at: new Date().toISOString() } : s))
     );
-    addToast('success', 'Đã đổi tên đoạn chat.');
+    addToast('success', `✏️ Đã đổi tên đoạn chat thành công: "${newTitle}"`);
   }, [addToast]);
 
-  // Handle Delete Session
-  const handleDeleteSession = useCallback((id: string) => {
+  // Request Delete Session (Open Confirmation Modal)
+  const handleRequestDeleteSession = useCallback((id: string) => {
     const sessionToDelete = sessions.find((s) => s.id === id);
     if (!sessionToDelete) return;
+    setTargetDeleteSession(sessionToDelete);
+    setIsDeleteModalOpen(true);
+  }, [sessions]);
 
-    if (confirm(`Bạn có chắc muốn xóa đoạn chat "${sessionToDelete.title}"?`)) {
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      setMessagesMap((prev) => {
-        const copy = { ...prev };
-        delete copy[id];
-        return copy;
-      });
+  // Confirm Delete Session
+  const handleConfirmDeleteSession = useCallback(() => {
+    if (!targetDeleteSession) return;
+    const id = targetDeleteSession.id;
+    const deletedTitle = targetDeleteSession.title;
 
+    setSessions((prev) => {
+      const remaining = prev.filter((s) => s.id !== id);
       if (currentSessionId === id) {
-        const remaining = sessions.filter((s) => s.id !== id);
         if (remaining.length > 0) {
           setCurrentSessionId(remaining[0].id);
         } else {
-          handleNewChat();
+          const newId = `session-${Date.now()}`;
+          const nowStr = new Date().toISOString();
+          const newSession: ChatSession = {
+            id: newId,
+            title: 'Cuộc trò chuyện mới',
+            created_at: nowStr,
+            updated_at: nowStr,
+            message_count: 0,
+          };
+          setCurrentSessionId(newId);
+          return [newSession];
         }
       }
-      addToast('info', 'Đã xóa đoạn chat.');
-    }
-  }, [sessions, currentSessionId, handleNewChat, addToast]);
+      return remaining;
+    });
+
+    setMessagesMap((prev) => {
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
+
+    addToast('info', `🗑️ Đã xóa đoạn chat "${deletedTitle}" thành công.`);
+    setTargetDeleteSession(null);
+  }, [targetDeleteSession, currentSessionId, addToast]);
 
   // Handle Document Upload
   const handleUpload = useCallback(async (files: File[]) => {
@@ -390,11 +421,10 @@ export const App: React.FC = () => {
 
   // Handle Delete Document
   const handleDeleteDocument = useCallback(async (filename: string) => {
-    if (!confirm(`Bạn có chắc muốn xóa tài liệu "${filename}" khỏi kho RAG?`)) return;
     try {
       await deleteDocument(filename);
       setDocuments((prev) => prev.filter((d) => d.filename !== filename));
-      addToast('success', `Đã xóa tài liệu "${filename}".`);
+      addToast('success', `Đã xóa tài liệu "${filename}" khỏi kho RAG.`);
       await loadSystemData();
     } catch {
       setDocuments((prev) => prev.filter((d) => d.filename !== filename));
@@ -615,47 +645,79 @@ export const App: React.FC = () => {
     }
   }, [messagesMap, currentSessionId, handleSendMessage]);
 
+  // Toggle Pin Status of Session
+  const handleTogglePinSession = useCallback((id: string) => {
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id === id) {
+          const newPinned = !s.pinned;
+          addToast('info', newPinned ? '📌 Đã ghim cuộc trò chuyện lên đầu!' : 'Đã bỏ ghim cuộc trò chuyện.');
+          return { ...s, pinned: newPinned };
+        }
+        return s;
+      })
+    );
+  }, [addToast]);
+
+  // Open Share Modal
+  const handleOpenShare = useCallback((session?: ChatSession) => {
+    const target = session || sessions.find((s) => s.id === currentSessionId);
+    setTargetShareSession(target || null);
+    setIsShareModalOpen(true);
+  }, [sessions, currentSessionId]);
+
+  // Open Rename Modal
+  const handleOpenRename = useCallback((session?: ChatSession) => {
+    const target = session || sessions.find((s) => s.id === currentSessionId);
+    setTargetRenameSession(target || null);
+    setIsRenameModalOpen(true);
+  }, [sessions, currentSessionId]);
+
+  // Download PDF
+  const handleDownloadPdf = useCallback((session?: ChatSession) => {
+    const target = session || sessions.find((s) => s.id === currentSessionId);
+    if (!target) return;
+    const msgs = messagesMap[target.id] || [];
+    if (msgs.length === 0) {
+      addToast('warning', 'Chưa có nội dung tin nhắn để xuất bản PDF.');
+      return;
+    }
+    exportChatToPdf(target.title, msgs);
+    addToast('success', 'Đang tạo bản in / PDF của cuộc trò chuyện...');
+  }, [sessions, currentSessionId, messagesMap, addToast]);
+
+  // Export to Document (.doc format compatible with Google Docs & Word)
+  const handleExportDoc = useCallback((session?: ChatSession) => {
+    const target = session || sessions.find((s) => s.id === currentSessionId);
+    if (!target) return;
+    const msgs = messagesMap[target.id] || [];
+    if (msgs.length === 0) {
+      addToast('warning', 'Chưa có nội dung tin nhắn để xuất Tài liệu.');
+      return;
+    }
+    exportChatToDoc(target.title, msgs);
+    addToast('success', 'Đã tải xuống tệp Tài liệu (.doc)!');
+  }, [sessions, currentSessionId, messagesMap, addToast]);
+
+  // Export Chat to Markdown
+  const handleExportChat = useCallback((session?: ChatSession) => {
+    const target = session || sessions.find((s) => s.id === currentSessionId);
+    if (!target) return;
+    const msgs = messagesMap[target.id] || [];
+    if (msgs.length === 0) {
+      addToast('warning', 'Chưa có tin nhắn để xuất Markdown.');
+      return;
+    }
+    exportChatToMarkdown(target.title, msgs);
+    addToast('success', 'Đã xuất đoạn hội thoại thành tệp Markdown!');
+  }, [sessions, currentSessionId, messagesMap, addToast]);
+
   // Clear Chat in Current Session
   const handleClearChat = useCallback(() => {
     if (currentMessages.length === 0) return;
-    if (confirm('Bạn có muốn xóa toàn bộ tin nhắn trong phiên trò chuyện này?')) {
-      setMessagesMap((prev) => ({ ...prev, [currentSessionId]: [] }));
-      addToast('info', 'Đã xóa đoạn hội thoại.');
-    }
+    setMessagesMap((prev) => ({ ...prev, [currentSessionId]: [] }));
+    addToast('info', '🧹 Đã xóa toàn bộ tin nhắn trong phiên chat này.');
   }, [currentMessages.length, currentSessionId, addToast]);
-
-  // Export Chat to Markdown
-  const handleExportChat = useCallback(() => {
-    if (currentMessages.length === 0) return;
-
-    const currentSession = sessions.find((s) => s.id === currentSessionId);
-    let md = `# Nhật Ký Tra Cứu RAG: ${currentSession?.title || 'Cuộc trò chuyện'}\n`;
-    md += `*Thời gian xuất:* ${new Date().toLocaleString()}\n\n---\n\n`;
-
-    currentMessages.forEach((msg, idx) => {
-      const role = msg.role === 'user' ? '👤 Người dùng' : '🤖 Trợ lý RAG';
-      md += `### [${idx + 1}] ${role} (${new Date(msg.timestamp).toLocaleTimeString()})\n\n`;
-      md += `${msg.content}\n\n`;
-
-      if (msg.sources && msg.sources.length > 0) {
-        md += `> **Nguồn trích dẫn:**\n`;
-        msg.sources.forEach((s, sIdx) => {
-          md += `> [${sIdx + 1}] ${s.source} (Trang ${s.page ?? 1})\n`;
-        });
-        md += `\n`;
-      }
-      md += `---\n\n`;
-    });
-
-    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `rag_chat_${(currentSession?.title || 'export').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addToast('success', 'Đã xuất đoạn hội thoại thành tệp Markdown!');
-  }, [currentMessages, sessions, currentSessionId, addToast]);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
 
@@ -675,7 +737,9 @@ export const App: React.FC = () => {
         onSelectSession={(id) => setCurrentSessionId(id)}
         onNewChat={handleNewChat}
         onRenameSession={handleRenameSession}
-        onDeleteSession={handleDeleteSession}
+        onDeleteSession={handleRequestDeleteSession}
+        onTogglePinSession={handleTogglePinSession}
+        onShareSession={(s) => handleOpenShare(s)}
         documents={documents}
         onOpenDocumentDrawer={() => setIsDocDrawerOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
@@ -688,17 +752,24 @@ export const App: React.FC = () => {
       {/* Main Chat Panel */}
       <div
         className={`flex-1 flex flex-col h-full overflow-hidden transition-all duration-300 ${
-          isSidebarCollapsed ? 'lg:pl-20' : 'lg:pl-72 xl:pl-80'
+          isSidebarCollapsed ? 'lg:pl-[68px]' : 'lg:pl-[280px] xl:pl-[300px]'
         }`}
       >
-        {/* Chat Header */}
+        {/* Chat Header with the 6 Sub-actions Menu */}
         <ChatHeader
-          sessionTitle={currentSession?.title || 'RAG Document Assistant'}
+          sessionTitle={currentSession?.title || 'NTU EduBot'}
+          isPinned={!!currentSession?.pinned}
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
           onOpenDocumentDrawer={() => setIsDocDrawerOpen(true)}
           onOpenSettings={() => setIsSettingsOpen(true)}
-          onExportChat={handleExportChat}
+          onExportChat={() => handleExportChat(currentSession)}
           onClearChat={handleClearChat}
+          onShareChat={() => handleOpenShare(currentSession)}
+          onTogglePin={() => currentSession && handleTogglePinSession(currentSession.id)}
+          onRenameChat={() => handleOpenRename(currentSession)}
+          onDownloadPdf={() => handleDownloadPdf(currentSession)}
+          onExportDoc={() => handleExportDoc(currentSession)}
+          onDeleteChat={() => currentSession && handleRequestDeleteSession(currentSession.id)}
           messageCount={currentMessages.length}
           docCount={documents.length}
           isDarkMode={isDarkMode}
@@ -789,6 +860,34 @@ export const App: React.FC = () => {
           setSettings(DEFAULT_SETTINGS);
           addToast('info', 'Đã khôi phục cài đặt mặc định.');
         }}
+      />
+
+      {/* Share Conversation Modal */}
+      <ShareModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        session={targetShareSession || currentSession}
+        messages={(targetShareSession ? messagesMap[targetShareSession.id] : currentMessages) || []}
+        onCopySuccess={() => addToast('success', 'Đã sao chép liên kết chia sẻ!')}
+      />
+
+      {/* Rename Conversation Modal */}
+      <RenameModal
+        isOpen={isRenameModalOpen}
+        onClose={() => setIsRenameModalOpen(false)}
+        currentTitle={targetRenameSession?.title || currentSession?.title || ''}
+        onSave={(newTitle) => {
+          const id = targetRenameSession?.id || currentSessionId;
+          if (id) handleRenameSession(id, newTitle);
+        }}
+      />
+
+      {/* Delete Conversation Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        sessionTitle={targetDeleteSession?.title || ''}
+        onConfirm={handleConfirmDeleteSession}
       />
     </div>
   );

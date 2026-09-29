@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from typing import List, Dict, Any, Tuple, Generator, Optional
 import pypdf
 import chromadb
@@ -12,6 +13,79 @@ from dotenv import load_dotenv
 import data as database
 
 load_dotenv()
+
+
+def is_quota_or_rate_limit_error(e: Exception) -> bool:
+    """Helper to detect 429 Quota Exceeded / Resource Exhausted errors from Gemini API."""
+    err_msg = str(e).lower()
+    err_type = type(e).__name__.lower()
+    
+    if hasattr(e, "code") and getattr(e, "code") == 429:
+        return True
+    if hasattr(e, "status_code") and getattr(e, "status_code") == 429:
+        return True
+        
+    keywords = ["429", "resource_exhausted", "resourceexhausted", "quota", "rate limit", "too many requests", "exhausted"]
+    return any(kw in err_msg or kw in err_type for kw in keywords)
+
+
+class GeminiKeyManager:
+    """
+    Thread-safe Round-Robin Key Manager and Cycler for Google Gemini API Keys.
+    Handles:
+    - Comma-separated GEMINI_KEYS parsing and validation
+    - Round-robin key rotation across incoming requests
+    - Automatic fallback and retries upon encountering 429 (Resource Exhausted / Quota Exceeded)
+    """
+    def __init__(self, raw_keys_str: Optional[str] = None):
+        self.lock = threading.Lock()
+        self.keys: List[str] = []
+        self.clients: List[genai.Client] = []
+        self._counter: int = 0
+        self.load_keys(raw_keys_str)
+
+    def load_keys(self, raw_keys_str: Optional[str] = None):
+        if raw_keys_str is None:
+            raw_keys_str = os.getenv("GEMINI_KEYS", "") or os.getenv("GEMINI_API_KEY", "")
+        
+        parsed_keys: List[str] = []
+        for k in raw_keys_str.split(","):
+            cleaned = k.strip().strip('"').strip("'").strip()
+            if cleaned and cleaned not in parsed_keys:
+                parsed_keys.append(cleaned)
+                
+        self.keys = parsed_keys
+        self.clients = []
+        for k in self.keys:
+            try:
+                self.clients.append(genai.Client(api_key=k))
+            except Exception as e:
+                print(f"[GeminiKeyManager] Warning initializing client for key ...{k[-6:] if len(k)>6 else k}: {e}")
+
+        print(f"[GeminiKeyManager] Initialized with {len(self.keys)} active Gemini API key(s).")
+
+    @property
+    def total_keys(self) -> int:
+        return len(self.keys)
+
+    def get_key_pool(self) -> List[Tuple[genai.Client, str, int]]:
+        """
+        Returns a round-robin ordered list of (client, key, idx) starting from the next rotated index,
+        allowing a request to attempt all keys in cyclical order.
+        """
+        if not self.keys or not self.clients:
+            return []
+            
+        with self.lock:
+            start_idx = self._counter % len(self.keys)
+            self._counter += 1
+
+        pool = []
+        n = len(self.keys)
+        for i in range(n):
+            idx = (start_idx + i) % n
+            pool.append((self.clients[idx], self.keys[idx], idx))
+        return pool
 
 
 class RecursiveTextSplitter:
@@ -123,55 +197,52 @@ class RAGEngine:
             metadata={"hnsw:space": "cosine"}
         )
         
-        # Configure Gemini API keys (supports rotation)
-        raw_keys = os.getenv("GEMINI_KEYS", "") or os.getenv("GEMINI_API_KEY", "")
-        self.gemini_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        # Configure Gemini API keys (supports Round-Robin & 429 Fallback)
+        self.key_manager = GeminiKeyManager()
+        self.gemini_keys = self.key_manager.keys
         self.current_key_idx = 0
-        self._init_gemini_client()
 
         # Configure Cohere Reranker
         self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
         self.cohere_client = cohere.Client(api_key=self.cohere_key) if self.cohere_key else None
 
-    def _init_gemini_client(self):
-        if self.gemini_keys:
-            key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)]
-            self.gemini_client = genai.Client(api_key=key)
-        else:
-            self.gemini_client = None
-
-    def _rotate_key_if_needed(self):
-        if len(self.gemini_keys) > 1:
-            self.current_key_idx = (self.current_key_idx + 1) % len(self.gemini_keys)
-            self._init_gemini_client()
+    @property
+    def gemini_client(self):
+        """Backward-compatible access to a client."""
+        if self.key_manager.clients:
+            return self.key_manager.clients[0]
+        return None
 
     def get_embedding(self, text: str) -> List[float]:
-        """Tạo embedding vector cho đoạn văn bản sử dụng Google Gemini embedding."""
-        if not self.gemini_client:
+        """Tạo embedding vector cho đoạn văn bản sử dụng Google Gemini embedding với Round-Robin & Fallback."""
+        if not self.key_manager.total_keys:
             raise ValueError("GEMINI_API_KEY / GEMINI_KEYS chưa được cấu hình trong .env")
         
         embed_models = ["gemini-embedding-001", "gemini-embedding-2"]
+        key_pool = self.key_manager.get_key_pool()
         last_err = None
 
-        for attempt in range(len(self.gemini_keys) or 1):
-            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
+        for client, key, key_idx in key_pool:
+            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
             for model_name in embed_models:
                 try:
-                    res = self.gemini_client.models.embed_content(
+                    res = client.models.embed_content(
                         model=model_name,
                         contents=text
                     )
                     return res.embeddings[0].values
                 except Exception as e:
                     last_err = e
-                    print(f"[GEMINI EMBED ERROR] Key index {self.current_key_idx} ({current_key[:6]}...) | Model '{model_name}' failed: {type(e).__name__}: {e}")
-                    continue
-            
-            self._rotate_key_if_needed()
+                    if is_quota_or_rate_limit_error(e):
+                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded on embedding model '{model_name}'. Rotating to next key...")
+                        break
+                    else:
+                        print(f"[GEMINI EMBED ERROR] Key #{key_idx} ({masked_key}) | Model '{model_name}' failed: {type(e).__name__}: {e}")
+                        continue
 
         if last_err:
             raise last_err
-        raise ValueError("Không thể tạo embedding.")
+        raise ValueError("Không thể tạo embedding từ tất cả các API keys.")
 
     def extract_text_from_file(self, file_path: str, original_filename: str) -> List[Dict[str, Any]]:
         """
@@ -407,12 +478,13 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
 
         gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
         faqs: List[str] = []
+        key_pool = self.key_manager.get_key_pool()
 
-        for attempt in range(len(self.gemini_keys) or 1):
-            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
+        for client, key, key_idx in key_pool:
+            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
             for m_name in gen_models:
                 try:
-                    res = self.gemini_client.models.generate_content(
+                    res = client.models.generate_content(
                         model=m_name,
                         contents=prompt,
                         config=types.GenerateContentConfig(
@@ -431,11 +503,14 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                         faqs = [str(q).strip() for q in parsed if str(q).strip()]
                         break
                 except Exception as e:
-                    print(f"[GEMINI FAQS ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
-                    continue
+                    if is_quota_or_rate_limit_error(e):
+                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded during FAQ generation on '{m_name}'. Retrying with next key...")
+                        break
+                    else:
+                        print(f"[GEMINI FAQS ERROR] Key #{key_idx} ({masked_key}) | Model '{m_name}': {type(e).__name__}: {e}")
+                        continue
             if faqs:
                 break
-            self._rotate_key_if_needed()
 
         if faqs:
             database.clear_suggested_questions(doc_id)
@@ -583,12 +658,13 @@ CÂU TRẢ LỜI:"""
         
         gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
         answer = ""
+        key_pool = self.key_manager.get_key_pool()
 
-        for attempt in range(len(self.gemini_keys) or 1):
-            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
+        for client, key, key_idx in key_pool:
+            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
             for m_name in gen_models:
                 try:
-                    response = self.gemini_client.models.generate_content(
+                    response = client.models.generate_content(
                         model=m_name,
                         contents=prompt,
                         config=types.GenerateContentConfig(
@@ -598,11 +674,14 @@ CÂU TRẢ LỜI:"""
                     answer = response.text
                     break
                 except Exception as e:
-                    print(f"[GEMINI QUERY ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
-                    answer = f"Lỗi trong quá trình sinh câu trả lời: {type(e).__name__} - {e}"
+                    if is_quota_or_rate_limit_error(e):
+                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded on model '{m_name}'. Retrying with next key...")
+                        break
+                    else:
+                        print(f"[GEMINI QUERY ERROR] Key #{key_idx} ({masked_key}) | Model '{m_name}': {type(e).__name__}: {e}")
+                        answer = f"Lỗi trong quá trình sinh câu trả lời: {type(e).__name__} - {e}"
             if answer and not answer.startswith("Lỗi trong quá trình"):
                 break
-            self._rotate_key_if_needed()
 
         latency = round(time.time() - start_time, 2)
         
@@ -647,12 +726,13 @@ CÂU TRẢ LỜI:"""
         full_answer = ""
         gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
         stream_success = False
+        key_pool = self.key_manager.get_key_pool()
 
-        for attempt in range(len(self.gemini_keys) or 1):
-            current_key = self.gemini_keys[self.current_key_idx % len(self.gemini_keys)] if self.gemini_keys else "N/A"
+        for client, key, key_idx in key_pool:
+            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
             for m_name in gen_models:
                 try:
-                    response_stream = self.gemini_client.models.generate_content_stream(
+                    response_stream = client.models.generate_content_stream(
                         model=m_name,
                         contents=prompt,
                         config=types.GenerateContentConfig(
@@ -667,14 +747,18 @@ CÂU TRẢ LỜI:"""
                     stream_success = True
                     break
                 except Exception as e:
-                    print(f"[GEMINI STREAM ERROR] Key {current_key[:6]}... | Model '{m_name}': {type(e).__name__}: {e}")
-                    continue
+                    if is_quota_or_rate_limit_error(e):
+                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded during stream on '{m_name}'. Retrying with next key...")
+                        full_answer = ""
+                        break
+                    else:
+                        print(f"[GEMINI STREAM ERROR] Key #{key_idx} ({masked_key}) | Model '{m_name}': {type(e).__name__}: {e}")
+                        continue
             if stream_success:
                 break
-            self._rotate_key_if_needed()
 
         if not stream_success:
-            error_msg = "\n[Lỗi kết nối Gemini: Không thể sinh phản hồi từ API. Vui lòng kiểm tra lại GEMINI_KEYS trong .env]"
+            error_msg = "\n[Lỗi kết nối Gemini: Không thể sinh phản hồi từ API sau khi đã thử tất cả các key. Vui lòng kiểm tra lại GEMINI_KEYS trong .env]"
             full_answer += error_msg
             yield {"type": "token", "token": error_msg}
 

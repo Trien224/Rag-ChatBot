@@ -4,7 +4,6 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { 
   User, 
-  Bot, 
   Copy, 
   Check, 
   Clock, 
@@ -22,6 +21,7 @@ import {
 } from 'lucide-react';
 import { ChatMessage, SourceItem } from '../types/rag';
 import { formatLatency, formatTime, formatPercentage } from '../utils/formatters';
+import { NtuEduBotIcon } from './NtuBotIcon';
 
 interface MessageItemProps {
   message: ChatMessage;
@@ -99,13 +99,13 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(({
     >
       {/* Avatar */}
       <div
-        className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 shadow-glow-sm ${
+        className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 shadow-glow-sm overflow-hidden ${
           isUser
             ? 'bg-gradient-to-tr from-cyan-600 to-blue-500 text-white'
-            : 'bg-gradient-to-tr from-indigo-600 via-purple-600 to-cyan-500 text-white'
+            : 'bg-gradient-to-tr from-sky-500 via-indigo-600 to-purple-600 p-0.5'
         }`}
       >
-        {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+        {isUser ? <User className="w-4 h-4" /> : <NtuEduBotIcon className="w-full h-full" />}
       </div>
 
       {/* Content Body */}
@@ -114,12 +114,12 @@ export const MessageItem: React.FC<MessageItemProps> = React.memo(({
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-bold text-slate-900 dark:text-slate-200 font-display">
-              {isUser ? 'Bạn' : 'Trợ lý Tra cứu RAG'}
+              {isUser ? 'Bạn' : 'NTU EduBot'}
             </span>
             {!isUser && (
               <span className="flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20">
                 <Sparkles className="w-2.5 h-2.5" />
-                {message.model || 'Gemini 2.5 Flash'}
+                {message.model || 'NTU EduBot • Gemini'}
               </span>
             )}
             <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">

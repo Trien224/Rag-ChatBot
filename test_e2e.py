@@ -17,7 +17,7 @@ def test_e2e_pipeline():
     print("\n[1/7] Kiểm tra Giao diện Web (Static & HTML)...")
     res = requests.get(f"{BASE_URL}/")
     assert res.status_code == 200, f"Lỗi load index.html: {res.status_code}"
-    assert "RAG Document Assistant" in res.text, "Index HTML không đúng tiêu đề"
+    assert "NTU EduBot" in res.text, "Index HTML không đúng tiêu đề"
     
     res_css = requests.get(f"{BASE_URL}/static/style.css")
     assert res_css.status_code == 200, "Lỗi load style.css"
