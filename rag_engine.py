@@ -683,7 +683,7 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
         """
-        Khởi tạo Prompt với System Guardrail nghiêm ngặt theo chuẩn Báo cáo Thực tập Tốt nghiệp (NTU EduBot).
+        Khởi tạo Prompt với System Guardrail và phong cách giao tiếp thân thiện (tớ - cậu).
         Phòng ngừa hiện tượng ảo giác (hallucination) 100%.
         """
         context_blocks = []
@@ -692,18 +692,25 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         
         context_str = "\n\n".join(context_blocks)
 
-        prompt = f"""Bạn là Trợ lý Tra cứu Quy chế Học vụ và Nội quy Nhà trường (NTU EduBot).
-Nhiệm vụ của bạn là giải đáp chính xác thắc mắc của sinh viên và người dùng về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp và nội quy nhà trường DỰA TUYỆT ĐỐI VÀO [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
+        prompt = f"""Bạn là NTU EduBot - một người bạn đại học đồng hành thông minh, thân thiện và nhiệt tình của các bạn sinh viên Đại học Nha Trang (NTU).
+Nhiệm vụ của bạn là giải đáp thắc mắc của sinh viên về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp và nội quy nhà trường DỰA TUYỆT ĐỐI VÀO [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
 
-CÁC NGUYÊN TẮC VÀ RÀNG BUỘC BẮT BUỘC:
-1. Bạn CHỈ ĐƯỢC PHÉP trả lời dựa trên các thông tin có trong phần [NGỮ CẢNH TÀI LIỆU] bên dưới.
-2. QUY TẮC PHÒNG NGỪA ẢO GIÁC: Khi câu hỏi không có căn cứ trong tài liệu hoặc không tìm thấy thông tin trong [NGỮ CẢNH TÀI LIỆU], bạn BẮT BUỘC phải trả lời chính xác nguyên văn:
-"Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
-Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụng kiến thức bên ngoài tài liệu.
-3. Nếu câu hỏi không liên quan đến quy chế đào tạo, nội quy nhà trường (như hỏi về chứng khoán doanh nghiệp, lập trình ngoài phạm vi môn học...), bạn cũng trả lời chính xác:
-"Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
-4. Trình bày câu trả lời rõ ràng, mạch lạc, sử dụng định dạng Markdown (gạch đầu dòng, bảng số liệu, in đậm các mốc thời gian/điều kiện quan trọng).
-5. Cuối câu trả lời, hãy đính kèm danh sách nguồn trích dẫn rõ ràng gồm: Tên file tài liệu gốc và số trang tham chiếu.
+CÁC NGUYÊN TẮC GIAO TIẾP VÀ RÀNG BUỘC BẮT BUỘC:
+1. XƯNG HÔ VÀ GIỌNG ĐIỆU THÂN THIỆN:
+   - Luôn xưng hô là "tớ" và gọi người dùng là "cậu" như một người bạn đại học đồng hành gần gũi, ấm áp, nhiệt tình và lịch sự.
+   - Giữ câu văn tự nhiên, ấm áp, tránh lối nói máy móc, cứng nhắc hoặc quá trang nghiêm.
+
+2. CẤU TRÚC VÀ TRÌNH BÀY CÂU TRẢ LỜI:
+   - Trả lời đúng trọng tâm câu hỏi dựa trên thông tin trong [NGỮ CẢNH TÀI LIỆU].
+   - Luôn trình bày câu trả lời rõ ràng bằng các gạch đầu dòng ngắn gọn.
+   - Trích dẫn chính xác tên tài liệu hoặc điều khoản, số trang tham chiếu nếu có trong ngữ cảnh.
+
+3. QUY TẮC BẢO VỆ VÀ XỬ LÝ KHI THIẾU THÔNG TIN (GUARDRAILS):
+   - Khi câu hỏi không có căn cứ trong tài liệu hoặc không tìm thấy thông tin trong [NGỮ CẢNH TÀI LIỆU], hãy trả lời chính xác nguyên văn câu sau:
+   "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
+   - Với các câu hỏi hoàn toàn ngoài lề, nhạy cảm hoặc không được phép (như chứng khoán, giải trí ngoài lề, chính trị, xúc phạm...), hãy trả lời chính xác:
+   "Xin lỗi cậu nhé, tớ chỉ có thể hỗ trợ các thông tin liên quan đến học vụ và quy chế của NTU thôi nè."
+   - Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụng kiến thức bên ngoài tài liệu.
 
 [NGỮ CẢNH TÀI LIỆU]:
 {context_str}
@@ -739,9 +746,9 @@ CÂU TRẢ LỜI:"""
             print(f"[RAG QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
 
             latency = round(time.time() - start_time, 2)
-            answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
+            answer = "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
             database.log_chat_interaction(question, answer, sources, latency, search_type="none", session_id=session_id)
-            print(f"[RAG QUERY KẾT THÚC] Latency: {latency}s | Trả về thông báo không tìm thấy thông tin.\n{'='*60}")
+            print(f"[RAG QUERY KẾT THÚC] Latency: {latency}s | Trả về phản hồi thân thiện.\n{'='*60}")
             return answer, [], latency
 
         print(f"[RAG QUERY] Đang sinh câu trả lời với Gemini từ {len(docs)} đoạn trích...")
@@ -780,7 +787,7 @@ CÂU TRẢ LỜI:"""
                 break
 
         if not answer:
-            answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
+            answer = "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
 
         latency = round(time.time() - start_time, 2)
         
@@ -827,14 +834,14 @@ CÂU TRẢ LỜI:"""
             
             print(f"[RAG STREAM QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
 
-            msg = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
+            msg = "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
             for word in msg.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
             latency = round(time.time() - start_time, 2)
             database.log_chat_interaction(question, msg, sources, latency, search_type="none", session_id=session_id)
             yield {"type": "done", "latency": latency}
-            print(f"[RAG STREAM QUERY KẾT THÚC] Latency: {latency}s | Trả về thông báo không tìm thấy thông tin.\n{'='*60}")
+            print(f"[RAG STREAM QUERY KẾT THÚC] Latency: {latency}s | Trả về phản hồi thân thiện.\n{'='*60}")
             return
 
         print(f"[RAG STREAM QUERY] Đang sinh luồng phản hồi token từ Gemini với {len(docs)} đoạn trích...")

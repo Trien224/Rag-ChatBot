@@ -35,7 +35,7 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
       {/* Top-K Chunks */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">Top-K Chunks trích xuất</span>
+          <span className="font-medium text-slate-700 dark:text-slate-300">Số lượng văn bản</span>
           <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-indigo-500/10 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30">
             {settings.top_k}
           </span>
@@ -50,14 +50,14 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
           className="w-full h-1.5 bg-slate-200 dark:bg-dark-900 rounded-lg appearance-none cursor-pointer accent-indigo-500"
         />
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          Số lượng đoạn ngữ cảnh liên quan nhất được nạp vào LLM
+          Số lượng đoạn trích liên quan nhất được chọn lọc để đưa vào cho AI đọc.
         </p>
       </div>
 
       {/* Chunk Size */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">Chunk Size (ký tự)</span>
+          <span className="font-medium text-slate-700 dark:text-slate-300">Quét số ký tự</span>
           <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30">
             {settings.chunk_size}
           </span>
@@ -72,14 +72,14 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
           className="w-full h-1.5 bg-slate-200 dark:bg-dark-900 rounded-lg appearance-none cursor-pointer accent-cyan-500"
         />
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          Độ dài ký tự của mỗi đoạn khi chia nhỏ tài liệu
+          Độ dài ký tự tối đa của mỗi đoạn văn khi chia nhỏ tài liệu.
         </p>
       </div>
 
       {/* Chunk Overlap */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">Chunk Overlap (ký tự)</span>
+          <span className="font-medium text-slate-700 dark:text-slate-300">Vòng lặp (Độ gối đầu văn bản)</span>
           <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-violet-500/10 dark:bg-violet-500/20 text-violet-700 dark:text-violet-300 border border-violet-500/30">
             {settings.chunk_overlap}
           </span>
@@ -94,14 +94,14 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
           className="w-full h-1.5 bg-slate-200 dark:bg-dark-900 rounded-lg appearance-none cursor-pointer accent-violet-500"
         />
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          Độ chồng lặp giữa các chunk để giữ mạch ngữ cảnh
+          Số ký tự lặp lại giữa hai đoạn liền kề để tránh mất ngữ cảnh.
         </p>
       </div>
 
       {/* Temperature */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">Temperature (Sáng tạo)</span>
+          <span className="font-medium text-slate-700 dark:text-slate-300">Độ chính xác</span>
           <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
             {settings.temperature.toFixed(2)}
           </span>
@@ -116,7 +116,7 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
           className="w-full h-1.5 bg-slate-200 dark:bg-dark-900 rounded-lg appearance-none cursor-pointer accent-amber-500"
         />
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          0.0: Tuyệt đối chuẩn xác theo văn bản — 1.0: Trả lời tự do hơn
+          Kéo về mức thấp (0.0 - 0.2) để trả lời chính xác theo tài liệu; kéo cao để câu văn tự nhiên, linh hoạt hơn.
         </p>
       </div>
 
@@ -153,7 +153,7 @@ export const RagSettings: React.FC<RagSettingsProps> = React.memo(({
       <div className="p-3 rounded-xl bg-slate-100 dark:bg-dark-900/80 border border-slate-200 dark:border-slate-800 text-[11px] space-y-2 text-slate-600 dark:text-slate-400">
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5"><Cpu className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> LLM Model</span>
-          <strong className="text-slate-800 dark:text-slate-200 font-medium">Gemini 2.5 Flash</strong>
+          <strong className="text-slate-800 dark:text-slate-200 font-medium">Gemini 3.7 Flash</strong>
         </div>
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" /> Embedding</span>
