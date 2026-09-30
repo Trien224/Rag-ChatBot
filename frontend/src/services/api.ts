@@ -87,6 +87,23 @@ export async function deleteDocument(filename: string): Promise<void> {
   }
 }
 
+export function getOrCreateSessionId(): string {
+  try {
+    let sessionId = localStorage.getItem('chat_session_id');
+    if (!sessionId) {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        sessionId = crypto.randomUUID();
+      } else {
+        sessionId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      }
+      localStorage.setItem('chat_session_id', sessionId);
+    }
+    return sessionId;
+  } catch {
+    return 'default';
+  }
+}
+
 export async function clearSystem(target: 'history' | 'documents' | 'all'): Promise<string> {
   const res = await fetch(`${API_BASE}/api/clear`, {
     method: 'POST',
@@ -101,8 +118,9 @@ export async function clearSystem(target: 'history' | 'documents' | 'all'): Prom
   return data.message || 'Thao tác hoàn tất.';
 }
 
-export async function fetchHistory(limit = 30): Promise<HistoryItem[]> {
-  const res = await fetch(`${API_BASE}/api/history?limit=${limit}`);
+export async function fetchHistory(sessionId?: string, limit = 30): Promise<HistoryItem[]> {
+  const sid = sessionId || getOrCreateSessionId();
+  const res = await fetch(`${API_BASE}/api/history?session_id=${encodeURIComponent(sid)}&limit=${limit}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.history || [];
@@ -119,8 +137,10 @@ export async function queryRAGStream(
   question: string,
   settings: RagSettings,
   callbacks: StreamCallbacks,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sessionId?: string
 ): Promise<void> {
+  const sid = sessionId || getOrCreateSessionId();
   const payload = {
     question,
     top_k: settings.top_k,
@@ -129,6 +149,7 @@ export async function queryRAGStream(
     temperature: settings.temperature,
     use_rerank: settings.use_rerank,
     stream: settings.stream,
+    session_id: sid,
   };
 
   const res = await fetch(`${API_BASE}/api/query`, {

@@ -71,11 +71,17 @@ export interface HealthStatus {
 }
 
 export interface HistoryItem {
-  id: number;
+  id?: number;
+  log_id?: number;
+  session_id?: string;
+  user_id?: number;
   question: string;
   answer: string;
+  sources_cited?: SourceItem[] | any;
   sources_json?: string;
-  latency: number;
+  latency?: number;
+  latency_seconds?: number;
+  search_type?: string;
   created_at: string;
 }
 

@@ -395,6 +395,21 @@ document.addEventListener("DOMContentLoaded", () => {
     isGenerating = true;
     sendBtn.disabled = true;
 
+    function getSessionId() {
+      try {
+        let sid = localStorage.getItem("chat_session_id");
+        if (!sid) {
+          sid = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+            ? crypto.randomUUID()
+            : `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+          localStorage.setItem("chat_session_id", sid);
+        }
+        return sid;
+      } catch (e) {
+        return "default";
+      }
+    }
+
     const isStream = streamingToggle.checked;
     const reqBody = {
       question: query,
@@ -403,7 +418,8 @@ document.addEventListener("DOMContentLoaded", () => {
       chunk_overlap: parseInt(chunkOverlapSlider.value, 10),
       temperature: parseFloat(tempSlider.value),
       use_rerank: rerankToggle.checked,
-      stream: isStream
+      stream: isStream,
+      session_id: getSessionId()
     };
 
     let accumulatedText = "";

@@ -58,6 +58,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS chat_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER DEFAULT 1,
+                session_id TEXT DEFAULT 'default',
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 sources_cited TEXT,
@@ -67,6 +68,12 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
+
+        # Tự động kiểm tra và nâng cấp schema nếu bảng cũ chưa có cột session_id
+        cursor.execute("PRAGMA table_info(chat_logs)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "session_id" not in columns:
+            cursor.execute("ALTER TABLE chat_logs ADD COLUMN session_id TEXT DEFAULT 'default'")
 
         # 5. Bảng lưu câu hỏi gợi ý tự động (Suggested Questions / Pre-generated FAQs)
         cursor.execute('''
@@ -145,27 +152,36 @@ def save_chunk_record(doc_id: int, chunk_index: int, page_number: int, content: 
         ''', (doc_id, chunk_index, page_number, content, chroma_vector_id))
         conn.commit()
 
-def log_chat_interaction(question: str, answer: str, sources: List[Dict[str, Any]], latency: float = 0.0, search_type: str = "semantic", user_id: int = 1):
-    """Lưu lịch sử câu hỏi, câu trả lời, nguồn trích dẫn và thời gian phản hồi vào chat_logs."""
+def log_chat_interaction(
+    question: str, 
+    answer: str, 
+    sources: List[Dict[str, Any]], 
+    latency: float = 0.0, 
+    search_type: str = "semantic", 
+    user_id: int = 1,
+    session_id: str = "default"
+):
+    """Lưu lịch sử câu hỏi, câu trả lời, nguồn trích dẫn, thời gian phản hồi và session_id vào chat_logs."""
     sources_json = json.dumps(sources, ensure_ascii=False)
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO chat_logs (user_id, question, answer, sources_cited, latency_seconds, search_type)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, question, answer, sources_json, latency, search_type))
+            INSERT INTO chat_logs (user_id, session_id, question, answer, sources_cited, latency_seconds, search_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, session_id, question, answer, sources_json, latency, search_type))
         conn.commit()
 
-def get_recent_chat_history(limit: int = 30) -> List[Dict[str, Any]]:
-    """Lấy danh sách các câu hỏi đáp gần nhất."""
+def get_recent_chat_history(session_id: str = "default", limit: int = 30) -> List[Dict[str, Any]]:
+    """Lấy danh sách các câu hỏi đáp gần nhất theo session_id."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT log_id, question, answer, sources_cited, latency_seconds, search_type, created_at
+            SELECT log_id, session_id, user_id, question, answer, sources_cited, latency_seconds, search_type, created_at
             FROM chat_logs
+            WHERE session_id = ?
             ORDER BY log_id DESC
             LIMIT ?
-        ''', (limit,))
+        ''', (session_id, limit))
         rows = cursor.fetchall()
         results = []
         for r in rows:

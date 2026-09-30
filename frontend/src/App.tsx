@@ -18,7 +18,8 @@ import {
   uploadDocuments, 
   deleteDocument, 
   clearSystem, 
-  queryRAGStream 
+  queryRAGStream,
+  getOrCreateSessionId
 } from './services/api';
 import { 
   INITIAL_DOCUMENTS, 
@@ -277,6 +278,7 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    getOrCreateSessionId();
     loadSystemData();
   }, [loadSystemData]);
 
@@ -560,7 +562,8 @@ export const App: React.FC = () => {
             throw err;
           },
         },
-        abortCtrl.signal
+        abortCtrl.signal,
+        getOrCreateSessionId()
       );
     } catch (err: any) {
       if (err.name === 'AbortError') {

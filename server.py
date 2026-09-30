@@ -2,7 +2,7 @@ import os
 import json
 import shutil
 import asyncio
-from typing import List
+from typing import List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 # pyrefly: ignore [missing-import]
@@ -67,6 +67,7 @@ class QueryRequest(BaseModel):
     temperature: float = Field(0.2, ge=0.0, le=1.0, description="Sampling temperature for LLM")
     use_rerank: bool = Field(True, description="Enable Cohere Reranking if API key configured")
     stream: bool = Field(True, description="Stream response token by token via SSE")
+    session_id: Optional[str] = Field("default", description="User session ID for history isolation")
 
 
 class ClearRequest(BaseModel):
@@ -203,6 +204,8 @@ async def query_rag(req: QueryRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Câu hỏi không được để trống.")
 
+    session_id = req.session_id or "default"
+
     if req.stream:
         async def event_stream():
             loop = asyncio.get_event_loop()
@@ -210,7 +213,8 @@ async def query_rag(req: QueryRequest):
                 question=question,
                 top_k=req.top_k,
                 use_rerank=req.use_rerank,
-                temperature=req.temperature
+                temperature=req.temperature,
+                session_id=session_id
             )
 
             # Run synchronous generator in worker thread to prevent event loop blocking
@@ -243,7 +247,8 @@ async def query_rag(req: QueryRequest):
             question=question,
             top_k=req.top_k,
             use_rerank=req.use_rerank,
-            temperature=req.temperature
+            temperature=req.temperature,
+            session_id=session_id
         )
         return {
             "question": question,
@@ -254,10 +259,13 @@ async def query_rag(req: QueryRequest):
 
 
 @app.get("/api/history")
-async def get_history(limit: int = Query(30, ge=1, le=100)):
-    """Lấy danh sách các câu hỏi đáp gần nhất."""
-    history = database.get_recent_chat_history(limit=limit)
-    return {"history": history, "count": len(history)}
+async def get_history(
+    session_id: str = Query("default", description="Session ID for chat history"),
+    limit: int = Query(30, ge=1, le=100)
+):
+    """Lấy danh sách các câu hỏi đáp gần nhất theo session_id."""
+    history = database.get_recent_chat_history(session_id=session_id, limit=limit)
+    return {"history": history, "count": len(history), "session_id": session_id}
 
 
 @app.post("/api/clear")

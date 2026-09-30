@@ -1,4 +1,480 @@
 import os
+from pathlib import Path
+# pyrefly: ignore [missing-import]
+import streamlit as st
+from rag_engine import RAGEngine
+import database
+
+# Cấu hình trang giao diện
+st.set_page_config(
+    page_title="NTU EduBot - Trợ lý Tra cứu Quy chế Học vụ & Nội quy Nhà trường", 
+    page_icon="🎓", 
+    layout="wide"
+)
+
+@st.cache_resource
+def get_rag_engine():
+    """Khởi tạo RAG Engine và nạp file mẫu từ thư mục docs (tự động bỏ qua file đã đánh chỉ mục)."""
+    engine = RAGEngine()
+    docs_dir = Path("docs")
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    engine.ingest_docs_folder(str(docs_dir), chunk_size=800, chunk_overlap=150)
+    return engine
+
+# Khởi tạo engine với bắt lỗi chi tiết
+try:
+    rag = get_rag_engine()
+except Exception as e:
+    st.error(f"⚠️ Lỗi khởi tạo hệ thống: {e}")
+    st.info("Vui lòng kiểm tra lại file .env (GEMINI_KEYS và COHERE_API_KEY).")
+    st.stop()
+
+# Khởi tạo session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "uploaded_files_list" not in st.session_state:
+    st.session_state.uploaded_files_list = []
+
+# --- SIDEBAR: Quản lý tài liệu ---
+with st.sidebar:
+    st.header("📂 Kho Tài Liệu")
+    
+    # Hiển thị tài liệu mặc định
+    docs_dir = Path("docs")
+    if docs_dir.exists():
+        default_files = [f.name for f in docs_dir.glob("*.*") if f.suffix.lower() in [".pdf", ".docx", ".doc", ".txt", ".md"]]
+        if default_files:
+            st.markdown("**Tài liệu trong kho (`docs/`):**")
+            for f in default_files:
+                st.caption(f"📄 {f}")
+        else:
+            st.info("Thư mục `docs/` hiện chưa có tài liệu mẫu.")
+            
+    # Hiển thị tài liệu tải lên thêm
+    if st.session_state.uploaded_files_list:
+        st.markdown("**Tài liệu vừa tải lên:**")
+        for uf in st.session_state.uploaded_files_list:
+            st.caption(f"📑 {uf}")
+
+    st.divider()
+    
+    # Tải lên tài liệu mới
+    st.subheader("Tải lên tài liệu mới")
+    uploaded_file = st.file_uploader("Chọn file (.pdf, .docx, .txt, .md)", type=["pdf", "docx", "doc", "txt", "md"])
+    
+    if uploaded_file is not None:
+        if st.button("Xử lý & Nạp vào Database", use_container_width=True):
+            with st.spinner("Đang trích xuất và vector hóa dữ liệu (chunk_size=800, overlap=150)..."):
+                dest_path = os.path.join("docs", uploaded_file.name)
+                with open(dest_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                res = rag.ingest_file(dest_path, original_filename=uploaded_file.name, chunk_size=800, chunk_overlap=150)
+                if uploaded_file.name not in st.session_state.uploaded_files_list:
+                    st.session_state.uploaded_files_list.append(uploaded_file.name)
+                
+                if res.get("status") == "already_indexed":
+                    st.info(f"ℹ️ {res.get('message', 'Tài liệu đã tồn tại trong hệ thống.')}")
+                else:
+                    st.success(f"✅ Đã nạp thành công {res.get('chunks_count', 0)} đoạn từ `{uploaded_file.name}`!")
+
+    st.divider()
+    
+    # Nút xóa lịch sử trò chuyện
+    if st.button("🗑️ Xóa lịch sử trò chuyện", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# --- GIAO DIỆN CHÍNH: Chatbot ---
+st.title("🎓 NTU EduBot - Trợ Lý Tra Cứu Quy Chế Học Vụ & Nội Quy")
+st.caption("Mô hình: Google Gemini 2.5 Flash | Text-Embedding-004 | ChromaDB (Cosine) | SQLite (system_data.db)")
+
+# Hiển thị các câu hỏi gợi ý thường gặp (Pre-generated FAQs)
+suggested_faqs = database.get_suggested_questions(limit=6)
+clicked_question = None
+
+if suggested_faqs:
+    with st.container():
+        st.markdown("##### 💡 Gợi ý câu hỏi nhanh (FAQs):")
+        cols = st.columns(2)
+        for idx, faq in enumerate(suggested_faqs):
+            target_col = cols[idx % 2]
+            with target_col:
+                q_text = faq["question_text"]
+                doc_name = faq.get("filename") or ""
+                btn_caption = f"📄 {doc_name}: {q_text}" if doc_name else f"💬 {q_text}"
+                if st.button(btn_caption, key=f"faq_btn_{faq['question_id']}", use_container_width=True):
+                    clicked_question = q_text
+
+st.divider()
+
+# Hiển thị lịch sử chat
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("latency"):
+            st.caption(f"⏱️ Phản hồi trong {msg['latency']:.2f}s")
+        if "sources" in msg and msg["sources"]:
+            with st.expander("📍 Nguồn tham chiếu"):
+                seen = set()
+                for s in msg["sources"]:
+                    key = f"{s.get('source')}_p{s.get('page')}"
+                    if key not in seen:
+                        st.write(f"- Tệp: **{s.get('source')}** (Trang {s.get('page')})")
+                        seen.add(key)
+
+# Nhận câu hỏi từ người dùng (nhập bàn phím hoặc bấm nút gợi ý)
+user_query = st.chat_input("Nhập câu hỏi cần tra cứu...") or clicked_question
+
+if user_query:
+    # 1. Hiển thị câu hỏi người dùng
+    st.session_state.messages.append({"role": "user", "content": user_query})
+    with st.chat_message("user"):
+        st.markdown(user_query)
+
+    # 2. Sinh câu trả lời dạng Streaming
+    with st.chat_message("assistant"):
+        # Lưu container tạm để chứa sources và latency trong quá trình stream
+        stream_meta = {
+            "collected_sources": [],
+            "latency_val": 0.0
+        }
+
+        def stream_generator():
+            for event in rag.query_stream(user_query, top_k=2, use_rerank=True):
+                evt_type = event.get("type")
+                if evt_type == "sources":
+                    stream_meta["collected_sources"] = event.get("sources", [])
+                elif evt_type == "token":
+                    yield event.get("token", "")
+                elif evt_type == "done":
+                    stream_meta["latency_val"] = event.get("latency", 0.0)
+
+        # Phát trực tiếp văn bản ra màn hình ngay khi AI sinh token
+        full_response = st.write_stream(stream_generator())
+
+        # Hiển thị thời gian phản hồi
+        if stream_meta["latency_val"] > 0:
+            st.caption(f"⚡ Tốc độ phản hồi: {stream_meta['latency_val']:.2f}s | Tối ưu Perceived Latency < 1s")
+
+        # Hiển thị nguồn trích dẫn
+        if stream_meta["collected_sources"]:
+            with st.expander("📍 Nguồn tham chiếu"):
+                seen = set()
+                for s in stream_meta["collected_sources"]:
+                    key = f"{s.get('source')}_p{s.get('page')}"
+                    if key not in seen:
+                        st.write(f"- Tệp: **{s.get('source')}** (Trang {s.get('page')})")
+                        seen.add(key)
+
+        # Lưu vào session state
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": full_response,
+            "sources": stream_meta["collected_sources"],
+            "latency": stream_meta["latency_val"]
+        })
+import os
+import json
+import shutil
+import asyncio
+from typing import List
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+# pyrefly: ignore [missing-import]
+from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
+from fastapi.staticfiles import StaticFiles
+
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse# pyrefly: ignore [missing-import]
+from pydantic import BaseModel, Field
+
+from rag_engine import RAGEngine
+import data as database
+
+# Ensure docs and static directories exist
+DOCS_DIR = os.path.abspath("docs")
+os.makedirs(DOCS_DIR, exist_ok=True)
+STATIC_DIR = os.path.abspath("static")
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+# Initialize RAGEngine singleton
+rag = RAGEngine()
+
+# Lifespan context manager for startup and shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    database.init_db()
+    try:
+        count = rag.collection.count()
+        if count == 0:
+            print("[INFO] ChromaDB collection is empty. Scanning docs folder for initial documents...")
+            rag.ingest_docs_folder(DOCS_DIR)
+            print(f"[INFO] Initial ingestion complete. Total vectors: {rag.collection.count()}")
+        else:
+            print(f"[INFO] ChromaDB initialized with {count} existing chunks.")
+    except Exception as e:
+        print(f"[WARNING] Startup initial ingestion notice: {e}")
+    yield
+
+app = FastAPI(
+    title="Production RAG Document Q&A API",
+    description="End-to-End Retrieval-Augmented Generation (RAG) Document Assistant with FastAPI & ChromaDB",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+# Enable CORS for all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Request & Response Models
+class QueryRequest(BaseModel):
+    question: str = Field(..., description="User query or question")
+    top_k: int = Field(4, ge=1, le=15, description="Number of context chunks to retrieve")
+    chunk_size: int = Field(800, ge=200, le=3000, description="Chunk size for document splitting")
+    chunk_overlap: int = Field(150, ge=0, le=500, description="Chunk overlap")
+    temperature: float = Field(0.2, ge=0.0, le=1.0, description="Sampling temperature for LLM")
+    use_rerank: bool = Field(True, description="Enable Cohere Reranking if API key configured")
+    stream: bool = Field(True, description="Stream response token by token via SSE")
+
+
+class ClearRequest(BaseModel):
+    target: str = Field("all", description="'history' to clear chat logs, 'documents' to wipe vectors, or 'all'")
+
+
+# ========================== API ROUTES ==========================
+
+@app.get("/api/health")
+async def health_check():
+    """Kiểm tra trạng thái hoạt động của hệ thống và API keys."""
+    has_gemini = len(rag.gemini_keys) > 0
+    has_cohere = bool(rag.cohere_key)
+    try:
+        vector_count = rag.collection.count()
+    except Exception:
+        vector_count = 0
+        
+    return {
+        "status": "healthy",
+        "gemini_configured": has_gemini,
+        "cohere_configured": has_cohere,
+        "total_vectors": vector_count,
+        "collection_name": rag.collection_name
+    }
+
+
+@app.get("/api/stats")
+async def get_stats():
+    """Lấy số liệu thống kê tổng quan của hệ thống."""
+    stats = database.get_system_stats()
+    try:
+        stats["vector_count"] = rag.collection.count()
+    except Exception:
+        stats["vector_count"] = 0
+    return stats
+
+
+@app.get("/api/documents")
+async def list_documents():
+    """Lấy danh sách tất cả tài liệu đã được nạp."""
+    docs = database.get_all_documents()
+    return {"documents": docs, "total": len(docs)}
+
+
+@app.get("/api/faqs")
+@app.get("/api/suggested-questions")
+async def get_faqs(limit: int = Query(6, ge=1, le=50)):
+    """Lấy danh sách câu hỏi gợi ý FAQs tự động sinh từ tài liệu."""
+    faqs = database.get_suggested_questions(limit=limit)
+    return {"faqs": faqs, "total": len(faqs)}
+
+
+@app.post("/api/upload")
+async def upload_documents(
+    files: List[UploadFile] = File(...),
+    chunk_size: int = Form(800),
+    chunk_overlap: int = Form(150)
+):
+    """
+    Tải lên và xử lý nhiều tài liệu (.pdf, .docx, .txt, .md).
+    Tự động chia chunk, tạo embedding và lưu vào ChromaDB + SQLite.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Không có tệp tin nào được tải lên.")
+
+    allowed_exts = {".pdf", ".docx", ".doc", ".txt", ".md"}
+    processed_results = []
+
+    for file in files:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in allowed_exts:
+            processed_results.append({
+                "filename": file.filename,
+                "status": "error",
+                "error": f"Định dạng tệp không được hỗ trợ ({ext}). Hỗ trợ: .pdf, .docx, .txt, .md"
+            })
+            continue
+
+        safe_filename = os.path.basename(file.filename)
+        dest_path = os.path.join(DOCS_DIR, safe_filename)
+
+        try:
+            # Save file to docs directory
+            with open(dest_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            # Ingest into vector store & SQLite
+            res = rag.ingest_file(
+                file_path=dest_path,
+                original_filename=safe_filename,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap
+            )
+            processed_results.append(res)
+        except Exception as e:
+            processed_results.append({
+                "filename": safe_filename,
+                "status": "error",
+                "error": str(e)
+            })
+
+    return {
+        "message": f"Đã xử lý {len(files)} tệp tin.",
+        "results": processed_results
+    }
+
+
+@app.delete("/api/documents/{filename}")
+async def delete_document(filename: str):
+    """Xóa một tài liệu khỏi ChromaDB, SQLite và thư mục docs."""
+    success = rag.delete_document(filename)
+    
+    file_path = os.path.join(DOCS_DIR, filename)
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    return {
+        "success": success,
+        "message": f"Đã xóa tài liệu '{filename}' khỏi hệ thống."
+    }
+
+
+@app.post("/api/query")
+async def query_rag(req: QueryRequest):
+    """
+    Điểm cuối truy vấn tài liệu RAG.
+    Hỗ trợ cả Streaming (Server-Sent Events) và JSON đồng bộ.
+    """
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Câu hỏi không được để trống.")
+
+    if req.stream:
+        async def event_stream():
+            loop = asyncio.get_event_loop()
+            generator = rag.query_stream(
+                question=question,
+                top_k=req.top_k,
+                use_rerank=req.use_rerank,
+                temperature=req.temperature
+            )
+
+            # Run synchronous generator in worker thread to prevent event loop blocking
+            def get_next():
+                try:
+                    return next(generator)
+                except StopIteration:
+                    return None
+
+            while True:
+                item = await loop.run_in_executor(None, get_next)
+                if item is None:
+                    break
+                
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.005)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    else:
+        # Non-streaming JSON response
+        answer, sources, latency = rag.query(
+            question=question,
+            top_k=req.top_k,
+            use_rerank=req.use_rerank,
+            temperature=req.temperature
+        )
+        return {
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+            "latency": latency
+        }
+
+
+@app.get("/api/history")
+async def get_history(limit: int = Query(30, ge=1, le=100)):
+    """Lấy danh sách các câu hỏi đáp gần nhất."""
+    history = database.get_recent_chat_history(limit=limit)
+    return {"history": history, "count": len(history)}
+
+
+@app.post("/api/clear")
+async def clear_system(req: ClearRequest):
+    """Xóa lịch sử chat hoặc đặt lại toàn bộ cơ sở dữ liệu vector."""
+    if req.target == "history":
+        database.clear_chat_logs()
+        return {"message": "Đã xóa toàn bộ lịch sử hỏi đáp."}
+    elif req.target == "documents":
+        rag.clear_all()
+        return {"message": "Đã xóa toàn bộ vector và tài liệu khỏi cơ sở dữ liệu."}
+    elif req.target == "all":
+        database.clear_chat_logs()
+        rag.clear_all()
+        return {"message": "Đã đặt lại toàn bộ hệ thống (lịch sử và vector)."}
+    else:
+        raise HTTPException(status_code=400, detail="Mục tiêu không hợp lệ ('history', 'documents', 'all').")
+
+
+# Static Files & Frontend Routing
+FRONTEND_DIST_DIR = os.path.abspath("frontend/dist")
+ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
+
+if os.path.exists(ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    """Phục vụ giao diện người dùng Web Chat UI (React Vite App hoặc Static fallback)."""
+    react_index = os.path.join(FRONTEND_DIST_DIR, "index.html")
+    if os.path.exists(react_index):
+        return FileResponse(react_index)
+        
+    static_index = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(static_index):
+        return FileResponse(static_index)
+    return HTMLResponse("<h1>RAG Backend Running. Giao diện đang được nạp...</h1>")
+import os
 import time
 import threading
 from typing import List, Dict, Any, Tuple, Generator, Optional
@@ -634,7 +1110,7 @@ Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụ
 CÂU TRẢ LỜI:"""
         return prompt
 
-    def query(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Tuple[str, List[Dict[str, Any]], float]:
+    def query(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2) -> Tuple[str, List[Dict[str, Any]], float]:
         """
         Truy vấn RAG dạng Batch JSON, trả về (câu trả lời, nguồn trích dẫn, latency).
         Mô hình LLM: Google Gemini (gemini-2.5-flash) với temperature = 0.2.
@@ -645,7 +1121,7 @@ CÂU TRẢ LỜI:"""
         if not docs:
             latency = round(time.time() - start_time, 2)
             answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
-            database.log_chat_interaction(question, answer, sources, latency, search_type="none", session_id=session_id)
+            database.log_chat_interaction(question, answer, sources, latency, search_type="none")
             return answer, [], latency
 
         prompt = self.build_prompt(question, docs)
@@ -689,11 +1165,11 @@ CÂU TRẢ LỜI:"""
         
         # Log SQLite sau khi hoàn thành
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
-        database.log_chat_interaction(question, answer, sources, latency, search_type=search_type, session_id=session_id)
+        database.log_chat_interaction(question, answer, sources, latency, search_type=search_type)
 
         return answer, sources, latency
 
-    def query_stream(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Generator[Dict[str, Any], None, None]:
+    def query_stream(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2) -> Generator[Dict[str, Any], None, None]:
         """
         Streaming Generator for Fast Response (Server-Sent Events & Streamlit).
         1. Gửi metadata nguồn trích dẫn ngay lập tức.
@@ -720,7 +1196,7 @@ CÂU TRẢ LỜI:"""
                 time.sleep(0.01)
             latency = round(time.time() - start_time, 2)
             # Log sau khi stream xong
-            database.log_chat_interaction(question, msg, sources, latency, search_type="none", session_id=session_id)
+            database.log_chat_interaction(question, msg, sources, latency, search_type="none")
             yield {"type": "done", "latency": latency}
             return
 
@@ -771,5 +1247,291 @@ CÂU TRẢ LỜI:"""
 
         latency = round(time.time() - start_time, 2)
         # Ghi log SQLite sau khi đã hoàn thành stream ra màn hình cho người dùng
-        database.log_chat_interaction(question, full_answer, sources, latency, search_type=search_type, session_id=session_id)
-        yield {"type": "done", "latency": latency, "full_text": full_answer}
+        database.log_chat_interaction(question, full_answer, sources, latency, search_type=search_type)
+        yield {"type": "done", "latency": latency, "full_text": full_answer}"""
+Database module alias for data.py.
+Provides full compatibility for both `import data` and `import database`.
+"""
+from data import *
+import sqlite3
+import json
+from typing import List, Dict, Any
+
+DB_FILE = "system_data.db"
+
+def get_connection():
+    """Tạo kết nối tới SQLite database."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Khởi tạo cấu trúc các bảng quản lý tài liệu, chunks và lịch sử chat."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # 1. Bảng quản lý người dùng
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 2. Bảng quản lý tài liệu (Documents)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS documents (
+                doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL UNIQUE,
+                file_path TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                file_type TEXT DEFAULT 'pdf',
+                total_pages INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'indexed',
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 3. Bảng quản lý các đoạn trích xuất (Document Chunks)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                page_number INTEGER NOT NULL DEFAULT 1,
+                content TEXT NOT NULL,
+                chroma_vector_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (doc_id) REFERENCES documents (doc_id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # 4. Bảng lưu lịch sử hỏi đáp và đánh giá (Chat Logs)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER DEFAULT 1,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                sources_cited TEXT,
+                latency_seconds REAL DEFAULT 0.0,
+                search_type TEXT DEFAULT 'semantic',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+
+        # 5. Bảng lưu câu hỏi gợi ý tự động (Suggested Questions / Pre-generated FAQs)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suggested_questions (
+                question_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id INTEGER NOT NULL,
+                question_text TEXT NOT NULL,
+                pre_computed_answer TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (doc_id) REFERENCES documents (doc_id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Thêm user mặc định nếu bảng trống
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, username, role) VALUES (1, 'default_user', 'user')")
+        conn.commit()
+
+def save_document_record(filename: str, file_path: str, file_size: int = 0, total_pages: int = 1, file_type: str = "pdf") -> int:
+    """Lưu hoặc cập nhật thông tin tài liệu vào bảng documents."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO documents (filename, file_path, file_size, total_pages, file_type, status)
+            VALUES (?, ?, ?, ?, ?, 'indexed')
+            ON CONFLICT(filename) DO UPDATE SET
+                file_path = excluded.file_path,
+                file_size = excluded.file_size,
+                total_pages = excluded.total_pages,
+                file_type = excluded.file_type,
+                uploaded_at = CURRENT_TIMESTAMP
+        ''', (filename, file_path, file_size, total_pages, file_type))
+        conn.commit()
+        
+        # Get actual doc_id
+        cursor.execute('SELECT doc_id FROM documents WHERE filename = ?', (filename,))
+        row = cursor.fetchone()
+        return row["doc_id"] if row else cursor.lastrowid
+
+def delete_document_record(filename: str) -> bool:
+    """Xóa tài liệu và các chunk liên quan khỏi SQLite."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT doc_id FROM documents WHERE filename = ?', (filename,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        doc_id = row["doc_id"]
+        cursor.execute('DELETE FROM document_chunks WHERE doc_id = ?', (doc_id,))
+        cursor.execute('DELETE FROM documents WHERE doc_id = ?', (doc_id,))
+        conn.commit()
+        return True
+
+def delete_all_document_records() -> bool:
+    """Xóa toàn bộ tài liệu và chunks trong SQLite."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM document_chunks')
+        cursor.execute('DELETE FROM documents')
+        conn.commit()
+        return True
+
+def clear_chunks_for_document(doc_id: int):
+    """Xóa các chunk cũ của một tài liệu trước khi nạp lại."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM document_chunks WHERE doc_id = ?', (doc_id,))
+        conn.commit()
+
+def save_chunk_record(doc_id: int, chunk_index: int, page_number: int, content: str, chroma_vector_id: str):
+    """Lưu thông tin đoạn chunk đã vector hóa vào bảng document_chunks."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO document_chunks (doc_id, chunk_index, page_number, content, chroma_vector_id)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (doc_id, chunk_index, page_number, content, chroma_vector_id))
+        conn.commit()
+
+def log_chat_interaction(question: str, answer: str, sources: List[Dict[str, Any]], latency: float = 0.0, search_type: str = "semantic", user_id: int = 1):
+    """Lưu lịch sử câu hỏi, câu trả lời, nguồn trích dẫn và thời gian phản hồi vào chat_logs."""
+    sources_json = json.dumps(sources, ensure_ascii=False)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO chat_logs (user_id, question, answer, sources_cited, latency_seconds, search_type)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, question, answer, sources_json, latency, search_type))
+        conn.commit()
+
+def get_recent_chat_history(limit: int = 30) -> List[Dict[str, Any]]:
+    """Lấy danh sách các câu hỏi đáp gần nhất."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT log_id, question, answer, sources_cited, latency_seconds, search_type, created_at
+            FROM chat_logs
+            ORDER BY log_id DESC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["sources_cited"] = json.loads(d["sources_cited"]) if d["sources_cited"] else []
+            except Exception:
+                d["sources_cited"] = []
+            results.append(d)
+        return results
+
+def clear_chat_logs() -> bool:
+    """Xóa toàn bộ lịch sử hỏi đáp."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM chat_logs')
+        conn.commit()
+        return True
+
+def get_all_documents() -> List[Dict[str, Any]]:
+    """Lấy danh sách tất cả tài liệu đã được nạp vào hệ thống."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT d.doc_id, d.filename, d.file_path, d.file_size, d.file_type, d.total_pages, d.uploaded_at,
+                   COUNT(c.chunk_id) as total_chunks
+            FROM documents d
+            LEFT JOIN document_chunks c ON d.doc_id = c.doc_id
+            GROUP BY d.doc_id
+            ORDER BY d.doc_id DESC
+        ''')
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+def get_system_stats() -> Dict[str, Any]:
+    """Tổng hợp số liệu thống kê hệ thống RAG."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM documents')
+        total_docs = cursor.fetchone()["count"]
+        
+        cursor.execute('SELECT COUNT(*) as count FROM document_chunks')
+        total_chunks = cursor.fetchone()["count"]
+        
+        cursor.execute('SELECT COUNT(*) as count, AVG(latency_seconds) as avg_latency FROM chat_logs')
+        log_stat = cursor.fetchone()
+        total_queries = log_stat["count"]
+        avg_latency = round(log_stat["avg_latency"] or 0.0, 2)
+        
+        return {
+            "total_documents": total_docs,
+            "total_chunks": total_chunks,
+            "total_queries": total_queries,
+            "average_latency_seconds": avg_latency
+        }
+
+def save_suggested_questions(doc_id: int, questions_list: List[Any]):
+    """Lưu danh sách câu hỏi gợi ý tự động sinh từ tài liệu vào SQLite."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        for q in questions_list:
+            if isinstance(q, dict):
+                q_text = str(q.get("question", "") or q.get("question_text", "")).strip()
+                q_ans = q.get("answer") or q.get("pre_computed_answer")
+            else:
+                q_text = str(q).strip()
+                q_ans = None
+            if q_text:
+                cursor.execute('''
+                    INSERT INTO suggested_questions (doc_id, question_text, pre_computed_answer)
+                    VALUES (?, ?, ?)
+                ''', (doc_id, q_text, q_ans))
+        conn.commit()
+
+def get_suggested_questions(limit: int = 6) -> List[Dict[str, Any]]:
+    """Lấy danh sách câu hỏi gợi ý từ các tài liệu đã nạp."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT sq.question_id, sq.doc_id, sq.question_text, sq.pre_computed_answer, sq.created_at, d.filename
+            FROM suggested_questions sq
+            LEFT JOIN documents d ON sq.doc_id = d.doc_id
+            ORDER BY sq.question_id DESC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def get_suggested_questions_by_doc(doc_id: int) -> List[Dict[str, Any]]:
+    """Lấy câu hỏi gợi ý theo doc_id cụ thể."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT question_id, doc_id, question_text, pre_computed_answer, created_at
+            FROM suggested_questions
+            WHERE doc_id = ?
+            ORDER BY question_id ASC
+        ''', (doc_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def clear_suggested_questions(doc_id: int = None):
+    """Xóa câu hỏi gợi ý của một tài liệu hoặc toàn bộ."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if doc_id:
+            cursor.execute('DELETE FROM suggested_questions WHERE doc_id = ?', (doc_id,))
+        else:
+            cursor.execute('DELETE FROM suggested_questions')
+        conn.commit()
+
+if __name__ == "__main__":
+    init_db()
+    print("Database SQLite đã sẵn sàng.")
