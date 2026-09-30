@@ -68,6 +68,8 @@ export interface HealthStatus {
   cohere_configured: boolean;
   total_vectors: number;
   collection_name: string;
+  indexed_files?: Array<{ filename: string; chunk_count: number }>;
+  indexed_filenames?: string[];
 }
 
 export interface HistoryItem {

@@ -1,9 +1,21 @@
 import os
+import sys
 import json
 import shutil
 import asyncio
 from typing import List, Optional
 from contextlib import asynccontextmanager
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,15 +42,57 @@ rag = RAGEngine()
 async def lifespan(app: FastAPI):
     database.init_db()
     try:
-        count = rag.collection.count()
-        if count == 0:
-            print("[INFO] ChromaDB collection is empty. Scanning docs folder for initial documents...")
-            rag.ingest_docs_folder(DOCS_DIR)
-            print(f"[INFO] Initial ingestion complete. Total vectors: {rag.collection.count()}")
+        total_vectors = 0
+        try:
+            total_vectors = rag.collection.count()
+        except Exception as e:
+            print(f"[STARTUP ERROR] Lỗi kiểm tra ChromaDB: {e}")
+
+        print(f"[STARTUP] ChromaDB hiện có {total_vectors} vectors trong collection '{rag.collection_name}'.")
+
+        # Quét danh sách file hợp lệ trong DOCS_DIR
+        doc_files = [
+            f for f in os.listdir(DOCS_DIR)
+            if os.path.splitext(f)[1].lower() in [".pdf", ".docx", ".doc", ".txt", ".md"]
+        ] if os.path.exists(DOCS_DIR) else []
+
+        # Lấy danh sách tài liệu đã có vector trong ChromaDB
+        indexed_sources = set()
+        if total_vectors > 0:
+            try:
+                chroma_meta_sample = rag.collection.get(include=["metadatas"])
+                if chroma_meta_sample and chroma_meta_sample.get("metadatas"):
+                    for m in chroma_meta_sample["metadatas"]:
+                        if m and "source" in m:
+                            indexed_sources.add(m["source"])
+            except Exception as e:
+                print(f"[STARTUP WARNING] Không thể đọc metadata từ ChromaDB: {e}")
+
+        missing_files = [f for f in doc_files if f not in indexed_sources]
+
+        if total_vectors == 0:
+            print(f"[STARTUP] Collection rỗng (0 vectors). Đang quét & nạp toàn bộ {len(doc_files)} tài liệu từ '{DOCS_DIR}'...")
+            rag.ingest_docs_folder(DOCS_DIR, force_reload=True)
+            print(f"[STARTUP] Hoàn tất nạp khởi động. Tổng số vectors hiện có: {rag.collection.count()}")
+        elif missing_files:
+            print(f"[STARTUP] Phát hiện {len(missing_files)}/{len(doc_files)} tài liệu chưa có trong ChromaDB: {missing_files}. Đang nạp bổ sung...")
+            for mf in missing_files:
+                fpath = os.path.join(DOCS_DIR, mf)
+                try:
+                    res = rag.ingest_file(fpath, original_filename=mf, force_reload=True)
+                    st = res.get("status")
+                    cnt = res.get("chunks_count", 0)
+                    if st in ["success", "already_indexed"]:
+                        print(f"  [✓ NẠP THÀNH CÔNG] '{mf}': {cnt} chunks")
+                    else:
+                        print(f"  [✗ NẠP THẤT BẠI] '{mf}': {res.get('error') or st}")
+                except Exception as ex:
+                    print(f"  [✗ LỖI NẠP] '{mf}': {ex}")
+            print(f"[STARTUP] Tổng số vectors sau khi bổ sung: {rag.collection.count()}")
         else:
-            print(f"[INFO] ChromaDB initialized with {count} existing chunks.")
+            print(f"[STARTUP] Tất cả {len(doc_files)} tài liệu đã được đánh chỉ mục đầy đủ trong ChromaDB ({total_vectors} vectors).")
     except Exception as e:
-        print(f"[WARNING] Startup initial ingestion notice: {e}")
+        print(f"[STARTUP EXCEPTION] Gặp sự cố trong quá trình khởi động RAG: {e}")
     yield
 
 app = FastAPI(
@@ -78,12 +132,31 @@ class ClearRequest(BaseModel):
 
 @app.get("/api/health")
 async def health_check():
-    """Kiểm tra trạng thái hoạt động của hệ thống và API keys."""
+    """
+    Kiểm tra trạng thái hoạt động của hệ thống, cấu hình API keys và danh sách
+    từng tài liệu đã được đánh chỉ mục trong ChromaDB.
+    """
     has_gemini = len(rag.gemini_keys) > 0
     has_cohere = bool(rag.cohere_key)
+    
+    vector_count = 0
+    indexed_files = []
     try:
         vector_count = rag.collection.count()
-    except Exception:
+        if vector_count > 0:
+            chroma_meta_sample = rag.collection.get(include=["metadatas"])
+            if chroma_meta_sample and chroma_meta_sample.get("metadatas"):
+                file_map = {}
+                for m in chroma_meta_sample["metadatas"]:
+                    if m and "source" in m:
+                        src = m["source"]
+                        file_map[src] = file_map.get(src, 0) + 1
+                indexed_files = [
+                    {"filename": fn, "chunk_count": count}
+                    for fn, count in file_map.items()
+                ]
+    except Exception as e:
+        print(f"[HEALTH CHECK ERROR] {e}")
         vector_count = 0
         
     return {
@@ -91,6 +164,8 @@ async def health_check():
         "gemini_configured": has_gemini,
         "cohere_configured": has_cohere,
         "total_vectors": vector_count,
+        "indexed_files": indexed_files,
+        "indexed_filenames": [f["filename"] for f in indexed_files],
         "collection_name": rag.collection_name
     }
 

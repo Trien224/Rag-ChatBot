@@ -103,13 +103,9 @@ export const App: React.FC = () => {
     }
   });
 
+  // Always start with a fresh new session on page load (New Chat)
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem('rag_current_session');
-      return saved || (INITIAL_SESSIONS[0]?.id || 'session-1');
-    } catch {
-      return 'session-1';
-    }
+    return `session-${Date.now()}`;
   });
 
   // All messages keyed by session ID
@@ -296,7 +292,8 @@ export const App: React.FC = () => {
     setSessions((prev) => [newSession, ...prev]);
     setMessagesMap((prev) => ({ ...prev, [newId]: [] }));
     setCurrentSessionId(newId);
-    addToast('info', 'Đã tạo đoạn chat mới.');
+    setInputQuery('');
+    addToast('info', 'Đã bắt đầu đoạn chat mới.');
   }, [addToast]);
 
   // Global Keyboard Shortcuts (Ctrl+K, Escape, Ctrl+Shift+L)
@@ -474,14 +471,35 @@ export const App: React.FC = () => {
     setInputQuery('');
     isAutoScrollPausedRef.current = false;
 
-    // Update session title if first message
+    // Update session title and session list
     const currentMsgs = messagesMap[currentSessionId] || [];
-    if (currentMsgs.length === 0) {
-      const generatedTitle = text.slice(0, 36) + (text.length > 36 ? '...' : '');
-      setSessions((prev) =>
-        prev.map((s) => (s.id === currentSessionId ? { ...s, title: generatedTitle } : s))
-      );
-    }
+    const generatedTitle = text.slice(0, 36) + (text.length > 36 ? '...' : '');
+
+    setSessions((prev) => {
+      const exists = prev.some((s) => s.id === currentSessionId);
+      if (exists) {
+        return prev.map((s) =>
+          s.id === currentSessionId
+            ? {
+                ...s,
+                title: (!s.message_count || s.message_count === 0 || s.title === 'Cuộc trò chuyện mới') ? generatedTitle : s.title,
+                updated_at: new Date().toISOString(),
+                message_count: (s.message_count || currentMsgs.length) + 1,
+              }
+            : s
+        );
+      } else {
+        const nowStr = new Date().toISOString();
+        const newSession: ChatSession = {
+          id: currentSessionId,
+          title: generatedTitle,
+          created_at: nowStr,
+          updated_at: nowStr,
+          message_count: 1,
+        };
+        return [newSession, ...prev];
+      }
+    });
 
     // User Message
     const userMsg: ChatMessage = {
@@ -563,7 +581,7 @@ export const App: React.FC = () => {
           },
         },
         abortCtrl.signal,
-        getOrCreateSessionId()
+        currentSessionId
       );
     } catch (err: any) {
       if (err.name === 'AbortError') {

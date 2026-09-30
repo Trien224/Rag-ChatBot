@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import threading
 from typing import List, Dict, Any, Tuple, Generator, Optional
@@ -8,6 +9,17 @@ from google import genai
 from google.genai import types
 import cohere
 from dotenv import load_dotenv
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # Database storage
 import data as database
@@ -154,6 +166,9 @@ except ImportError:
                 return [c for c in good_splits if c.strip()]
 
 
+RecursiveTextSplitter = RecursiveCharacterTextSplitter
+
+
 class RAGEngine:
     """
     Production-Grade RAG Engine supporting:
@@ -293,7 +308,7 @@ class RAGEngine:
                     chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False) -> Dict[str, Any]:
         """
         Nạp tài liệu, chia đoạn theo RecursiveCharacterTextSplitter, tạo embeddings và lưu vào ChromaDB + SQLite.
-        Tự động kiểm tra trùng lặp: nếu tài liệu đã tồn tại trong SQLite/ChromaDB thì bỏ qua để tối ưu hiệu năng.
+        Tự động kiểm tra trùng lặp: nếu tài liệu đã tồn tại trong CẢ SQLite và ChromaDB thì bỏ qua để tối ưu hiệu năng.
         """
         if original_filename is None:
             original_filename = os.path.basename(file_path)
@@ -309,24 +324,29 @@ class RAGEngine:
                         cursor.execute("SELECT COUNT(*) as cnt FROM document_chunks WHERE doc_id = ?", (existing_doc["doc_id"],))
                         chunk_cnt = cursor.fetchone()["cnt"]
                         if chunk_cnt > 0:
-                            # Đảm bảo tài liệu đã có câu hỏi gợi ý FAQs
-                            existing_faqs = database.get_suggested_questions_by_doc(existing_doc["doc_id"])
-                            if not existing_faqs:
-                                self.generate_faqs_for_pdf(file_path, existing_doc["doc_id"])
-                            return {
-                                "filename": original_filename,
-                                "chunks_count": chunk_cnt,
-                                "pages_count": existing_doc["total_pages"],
-                                "status": "already_indexed",
-                                "message": f"Tài liệu '{original_filename}' đã được đánh chỉ mục ({chunk_cnt} chunks), bỏ qua bước trích xuất & embedding."
-                            }
+                            # Xác thực rằng ChromaDB thực sự đang chứa vectors của file này
+                            chroma_items = self.collection.get(where={"source": original_filename}, limit=1)
+                            if chroma_items and chroma_items.get("ids") and len(chroma_items["ids"]) > 0:
+                                existing_faqs = database.get_suggested_questions_by_doc(existing_doc["doc_id"])
+                                if not existing_faqs:
+                                    self.generate_faqs_for_pdf(file_path, existing_doc["doc_id"])
+                                return {
+                                    "filename": original_filename,
+                                    "chunks_count": chunk_cnt,
+                                    "pages_count": existing_doc["total_pages"],
+                                    "status": "already_indexed",
+                                    "message": f"Tài liệu '{original_filename}' đã được đánh chỉ mục ({chunk_cnt} chunks) trong cả SQLite và ChromaDB."
+                                }
+                            else:
+                                print(f"[INGEST] Tài liệu '{original_filename}' có trong SQLite nhưng thiếu vector trong ChromaDB. Đang tiến hành nạp lại...")
             except Exception as e:
-                print(f"[INGEST] Lưu ý khi kiểm tra trùng lặp: {e}")
+                print(f"[INGEST] Lưu ý khi kiểm tra trùng lặp cho '{original_filename}': {e}")
 
         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
         pages_data = self.extract_text_from_file(file_path, original_filename)
         
         if not pages_data:
+            print(f"[INGEST CẢNH BÁO] Không thể trích xuất văn bản từ '{original_filename}' (file rỗng hoặc không đọc được).")
             return {"filename": original_filename, "chunks_count": 0, "status": "empty_file"}
 
         ext = os.path.splitext(original_filename)[1].lower().replace(".", "") or "txt"
@@ -343,7 +363,7 @@ class RAGEngine:
         database.clear_chunks_for_document(doc_id)
 
         # 2. Chia chunk thông minh
-        splitter = RecursiveTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         
         all_chunks = []
         all_ids = []
@@ -405,13 +425,14 @@ class RAGEngine:
                     documents=all_chunks[i:end_i],
                     metadatas=all_metas[i:end_i]
                 )
+            print(f"[INGEST CHROMA] Đã lưu {len(all_ids)} vectors của '{original_filename}' vào ChromaDB.")
 
         # 4. Tự động sinh câu hỏi thường gặp FAQs cho tài liệu
         generated_faqs = []
         try:
             generated_faqs = self.generate_faqs_for_pdf(file_path, doc_id)
         except Exception as ex:
-            print(f"[FAQS] Lỗi tự động sinh câu hỏi FAQs: {ex}")
+            print(f"[FAQS] Lỗi tự động sinh câu hỏi FAQs cho '{original_filename}': {ex}")
 
         return {
             "filename": original_filename,
@@ -465,7 +486,7 @@ Ví dụ:
 ]
 Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào ngoài chuỗi JSON hợp lệ."""
 
-        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
+        gen_models = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
         faqs: List[str] = []
         key_pool = self.key_manager.get_key_pool()
 
@@ -511,18 +532,44 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         """Wrapper nạp tài liệu PDF và tự động tạo FAQs."""
         return self.ingest_file(file_path, original_filename)
 
-    def ingest_docs_folder(self, folder_path: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False):
-        """Quét và nạp toàn bộ tài liệu có trong thư mục (tự động bỏ qua file đã có trong DB)."""
+    def ingest_docs_folder(self, folder_path: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False) -> List[Dict[str, Any]]:
+        """
+        Quét và nạp toàn bộ tài liệu có trong thư mục.
+        Log chi tiết từng file nạp thành công hay thất bại.
+        """
         if not os.path.exists(folder_path):
+            print(f"[INGEST FOLDER] Thư mục '{folder_path}' không tồn tại.")
             return []
         
         results = []
-        for file in os.listdir(folder_path):
-            ext = os.path.splitext(file)[1].lower()
-            if ext in [".pdf", ".docx", ".doc", ".txt", ".md"]:
-                full_path = os.path.join(folder_path, file)
-                res = self.ingest_file(full_path, original_filename=file, chunk_size=chunk_size, chunk_overlap=chunk_overlap, force_reload=force_reload)
+        files = [
+            f for f in os.listdir(folder_path)
+            if os.path.splitext(f)[1].lower() in [".pdf", ".docx", ".doc", ".txt", ".md"]
+        ]
+        print(f"[INGEST FOLDER] Bắt đầu quét thư mục '{folder_path}' ({len(files)} tệp tin)...")
+
+        for file in files:
+            full_path = os.path.join(folder_path, file)
+            try:
+                res = self.ingest_file(
+                    full_path,
+                    original_filename=file,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    force_reload=force_reload
+                )
                 results.append(res)
+                st = res.get("status")
+                chunks = res.get("chunks_count", 0)
+                if st in ["success", "already_indexed"]:
+                    print(f"  [✓ NẠP THÀNH CÔNG] '{file}': {chunks} chunks (Trạng thái: {st})")
+                else:
+                    err_msg = res.get("error") or res.get("message") or st
+                    print(f"  [✗ NẠP THẤT BẠI] '{file}': {err_msg}")
+            except Exception as e:
+                print(f"  [✗ LỖI NGOẠI LỆ] '{file}': {e}")
+                results.append({"filename": file, "status": "error", "error": str(e)})
+
         return results
 
     def delete_document(self, filename: str) -> bool:
@@ -547,39 +594,64 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         database.delete_all_document_records()
         return True
 
-    def retrieve(self, query_text: str, top_k: int = 2, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
+    def retrieve(self, query_text: str, top_k: int = 4, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
         Semantic Retrieval tối ưu:
-        1. Embeds query -> query ChromaDB với n_results=4.
-        2. Reranks candidates sử dụng Cohere Rerank lấy Top-2 (top_n=2) đoạn có độ liên quan cao nhất.
-        3. Trả về danh sách docs và metadata tương ứng.
+        1. Kiểm tra số lượng vectors trong collection.
+        2. Embeds query -> query ChromaDB với fetch_k (min 4, max top_k*2).
+        3. Reranks candidates sử dụng Cohere Rerank lấy Top-K đoạn có độ liên quan cao nhất.
+        4. Trả về danh sách docs và metadata tương ứng cùng logging chi tiết.
         """
+        total_vectors = 0
+        try:
+            total_vectors = self.collection.count()
+        except Exception as e:
+            print(f"[RAG RETRIEVE ERROR] Không thể đếm vectors trong ChromaDB: {e}")
+
+        print(f"\n[RAG RETRIEVE] Truy vấn: '{query_text}' | Tổng số vectors trong ChromaDB: {total_vectors}")
+
+        if total_vectors == 0:
+            print(f"[RAG RETRIEVE CẢNH BÁO] ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Không thể tìm kiếm tài liệu!")
+            return [], []
+
         q_embed = self.get_embedding(query_text)
         
-        # Lấy 4 chunks từ ChromaDB
-        search_results = self.collection.query(
-            query_embeddings=[q_embed],
-            n_results=4
-        )
+        # Lấy fetch_k candidates từ ChromaDB
+        fetch_k = min(max(top_k * 2, 4), total_vectors)
+        try:
+            search_results = self.collection.query(
+                query_embeddings=[q_embed],
+                n_results=fetch_k
+            )
+        except Exception as e:
+            print(f"[RAG RETRIEVE ERROR] Lỗi khi truy vấn ChromaDB: {e}")
+            return [], []
         
-        docs = search_results["documents"][0] if (search_results and search_results["documents"]) else []
-        metas = search_results["metadatas"][0] if (search_results and search_results["metadatas"]) else []
+        docs = search_results["documents"][0] if (search_results and search_results.get("documents")) else []
+        metas = search_results["metadatas"][0] if (search_results and search_results.get("metadatas")) else []
         distances = search_results["distances"][0] if (search_results and "distances" in search_results and search_results["distances"]) else []
 
         if not docs:
+            print(f"[RAG RETRIEVE KẾT QUẢ RỖNG] ChromaDB không trả về chunk nào khớp. (Tổng vectors trong DB: {total_vectors})")
             return [], []
 
         # Gán similarity/distance vào metadata
         for idx, m in enumerate(metas):
             if idx < len(distances):
-                m["distance"] = round(float(distances[idx]), 4)
-                m["similarity"] = round(max(0.0, 1.0 - float(distances[idx])), 4)
+                dist = float(distances[idx])
+                m["distance"] = round(dist, 4)
+                m["similarity"] = round(max(0.0, 1.0 - dist), 4)
             m["content_snippet"] = docs[idx][:200] + ("..." if len(docs[idx]) > 200 else "")
 
-        # Rerank với Cohere (lấy Top-2 có độ liên quan cao nhất)
+        print(f"[RAG RETRIEVE] Tìm thấy {len(docs)} chunks từ ChromaDB:")
+        for idx, m in enumerate(metas):
+            print(f"  - Chunk #{idx+1}: source={m.get('source')} (trang {m.get('page', 'N/A')}) | distance={m.get('distance')} | similarity={m.get('similarity')}")
+
+        # Rerank với Cohere (lấy Top-K có độ liên quan cao nhất)
         if use_rerank and self.cohere_client and len(docs) > 1:
             try:
-                target_top_n = min(top_k, 2, len(docs))
+                target_top_n = min(top_k, len(docs))
+                print(f"[RAG RERANK] Đang rerank {len(docs)} chunks với Cohere Rerank v3.5 (lấy Top-{target_top_n})...")
                 rerank_resp = self.cohere_client.rerank(
                     model="rerank-v3.5",
                     query=query_text,
@@ -594,12 +666,20 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                     m["relevance_score"] = round(float(item.relevance_score), 4)
                     ranked_docs.append(docs[i])
                     ranked_metas.append(m)
+
+                print(f"[RAG RERANK] Kết quả sau khi Rerank ({len(ranked_docs)} chunks):")
+                for idx, m in enumerate(ranked_metas):
+                    print(f"  - Rerank #{idx+1}: source={m.get('source')} (trang {m.get('page', 'N/A')}) | relevance_score={m.get('relevance_score')} | similarity={m.get('similarity')}")
+
                 return ranked_docs, ranked_metas
             except Exception as e:
-                print(f"Cohere rerank fallback to cosine: {e}")
+                print(f"[RAG RERANK WARNING] Cohere rerank gặp lỗi, fallback về Cosine similarity: {e}")
 
-        # Mặc định lấy top_k (mặc định 2) từ vector search
-        return docs[:top_k], metas[:top_k]
+        # Mặc định lấy top_k từ vector search
+        selected_docs = docs[:top_k]
+        selected_metas = metas[:top_k]
+        print(f"[RAG RETRIEVE] Sử dụng Top-{len(selected_docs)} chunks từ Cosine similarity.")
+        return selected_docs, selected_metas
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
         """
@@ -634,23 +714,40 @@ Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụ
 CÂU TRẢ LỜI:"""
         return prompt
 
-    def query(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Tuple[str, List[Dict[str, Any]], float]:
+    def query(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Tuple[str, List[Dict[str, Any]], float]:
         """
         Truy vấn RAG dạng Batch JSON, trả về (câu trả lời, nguồn trích dẫn, latency).
-        Mô hình LLM: Google Gemini (gemini-2.5-flash) với temperature = 0.2.
+        Mô hình LLM: Google Gemini với temperature = 0.2.
         """
         start_time = time.time()
+        print(f"\n{'='*60}\n[RAG QUERY BẮT ĐẦU] Câu hỏi: '{question}' | top_k={top_k}, rerank={use_rerank}, session={session_id}")
+
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
         
         if not docs:
+            total_vecs = 0
+            try:
+                total_vecs = self.collection.count()
+            except Exception:
+                pass
+
+            if total_vecs == 0:
+                reason = f"ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Chưa có tài liệu nào được nạp vào ChromaDB."
+            else:
+                reason = f"ChromaDB có {total_vecs} vectors nhưng không tìm thấy đoạn trích nào liên quan hoặc không đạt ngưỡng độ tương đồng."
+            
+            print(f"[RAG QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
+
             latency = round(time.time() - start_time, 2)
             answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
             database.log_chat_interaction(question, answer, sources, latency, search_type="none", session_id=session_id)
+            print(f"[RAG QUERY KẾT THÚC] Latency: {latency}s | Trả về thông báo không tìm thấy thông tin.\n{'='*60}")
             return answer, [], latency
 
+        print(f"[RAG QUERY] Đang sinh câu trả lời với Gemini từ {len(docs)} đoạn trích...")
         prompt = self.build_prompt(question, docs)
         
-        candidates = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
+        candidates = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
         if self._active_gen_model and self._active_gen_model in candidates:
             gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
         else:
@@ -691,9 +788,10 @@ CÂU TRẢ LỜI:"""
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
         database.log_chat_interaction(question, answer, sources, latency, search_type=search_type, session_id=session_id)
 
+        print(f"[RAG QUERY HOÀN TẤT] Latency: {latency}s | Số nguồn trích dẫn: {len(sources)}\n{'='*60}")
         return answer, sources, latency
 
-    def query_stream(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Generator[Dict[str, Any], None, None]:
+    def query_stream(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Generator[Dict[str, Any], None, None]:
         """
         Streaming Generator for Fast Response (Server-Sent Events & Streamlit).
         1. Gửi metadata nguồn trích dẫn ngay lập tức.
@@ -701,6 +799,8 @@ CÂU TRẢ LỜI:"""
         3. Ghi log SQLite sau khi đã hoàn tất toàn bộ stream ra cho người dùng để không gây nghẽn.
         """
         start_time = time.time()
+        print(f"\n{'='*60}\n[RAG STREAM QUERY BẮT ĐẦU] Câu hỏi: '{question}' | top_k={top_k}, rerank={use_rerank}, session={session_id}")
+
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
         
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
@@ -714,19 +814,33 @@ CÂU TRẢ LỜI:"""
         }
 
         if not docs:
+            total_vecs = 0
+            try:
+                total_vecs = self.collection.count()
+            except Exception:
+                pass
+
+            if total_vecs == 0:
+                reason = f"ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Chưa có tài liệu nào được nạp vào ChromaDB."
+            else:
+                reason = f"ChromaDB có {total_vecs} vectors nhưng không tìm thấy đoạn trích nào phù hợp với câu hỏi."
+            
+            print(f"[RAG STREAM QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
+
             msg = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
             for word in msg.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
             latency = round(time.time() - start_time, 2)
-            # Log sau khi stream xong
             database.log_chat_interaction(question, msg, sources, latency, search_type="none", session_id=session_id)
             yield {"type": "done", "latency": latency}
+            print(f"[RAG STREAM QUERY KẾT THÚC] Latency: {latency}s | Trả về thông báo không tìm thấy thông tin.\n{'='*60}")
             return
 
+        print(f"[RAG STREAM QUERY] Đang sinh luồng phản hồi token từ Gemini với {len(docs)} đoạn trích...")
         prompt = self.build_prompt(question, docs)
         full_answer = ""
-        candidates = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
+        candidates = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
         if self._active_gen_model and self._active_gen_model in candidates:
             gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
         else:
@@ -772,4 +886,5 @@ CÂU TRẢ LỜI:"""
         latency = round(time.time() - start_time, 2)
         # Ghi log SQLite sau khi đã hoàn thành stream ra màn hình cho người dùng
         database.log_chat_interaction(question, full_answer, sources, latency, search_type=search_type, session_id=session_id)
+        print(f"[RAG STREAM QUERY HOÀN TẤT] Latency: {latency}s | Tổng độ dài câu trả lời: {len(full_answer)} ký tự\n{'='*60}")
         yield {"type": "done", "latency": latency, "full_text": full_answer}
