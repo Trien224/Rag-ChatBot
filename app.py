@@ -7,7 +7,7 @@ import database
 
 # Cấu hình trang giao diện
 st.set_page_config(
-    page_title="Trợ lý Tra Cứu Nội Quy & Quy Chế Học Vụ (Gemini 2.5 Flash + Cohere)", 
+    page_title="NTU EduBot - Trợ lý Tra cứu Quy chế Học vụ & Nội quy Nhà trường", 
     page_icon="🎓", 
     layout="wide"
 )
@@ -18,7 +18,7 @@ def get_rag_engine():
     engine = RAGEngine()
     docs_dir = Path("docs")
     docs_dir.mkdir(parents=True, exist_ok=True)
-    engine.ingest_docs_folder(str(docs_dir))
+    engine.ingest_docs_folder(str(docs_dir), chunk_size=800, chunk_overlap=150)
     return engine
 
 # Khởi tạo engine với bắt lỗi chi tiết
@@ -65,12 +65,12 @@ with st.sidebar:
     
     if uploaded_file is not None:
         if st.button("Xử lý & Nạp vào Database", use_container_width=True):
-            with st.spinner("Đang trích xuất và vector hóa dữ liệu..."):
+            with st.spinner("Đang trích xuất và vector hóa dữ liệu (chunk_size=800, overlap=150)..."):
                 dest_path = os.path.join("docs", uploaded_file.name)
                 with open(dest_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 
-                res = rag.ingest_file(dest_path, original_filename=uploaded_file.name)
+                res = rag.ingest_file(dest_path, original_filename=uploaded_file.name, chunk_size=800, chunk_overlap=150)
                 if uploaded_file.name not in st.session_state.uploaded_files_list:
                     st.session_state.uploaded_files_list.append(uploaded_file.name)
                 
@@ -87,8 +87,8 @@ with st.sidebar:
         st.rerun()
 
 # --- GIAO DIỆN CHÍNH: Chatbot ---
-st.title("🎓 Trợ Lý Tra Cứu Nội Quy & Quy Chế Đào Tạo Nhà Trường")
-st.caption("Chuyên tra cứu Quy chế học vụ, Điểm số, Học phí, Học bổng, Thực tập, Đồ án tốt nghiệp | Gemini 2.5 Flash + Cohere Rerank")
+st.title("🎓 NTU EduBot - Trợ Lý Tra Cứu Quy Chế Học Vụ & Nội Quy")
+st.caption("Mô hình: Google Gemini 2.5 Flash | Text-Embedding-004 | ChromaDB (Cosine) | SQLite (system_data.db)")
 
 # Hiển thị các câu hỏi gợi ý thường gặp (Pre-generated FAQs)
 suggested_faqs = database.get_suggested_questions(limit=6)

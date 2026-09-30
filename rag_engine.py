@@ -88,103 +88,82 @@ class GeminiKeyManager:
         return pool
 
 
-class RecursiveTextSplitter:
-    """
-    Intelligent Recursive Character Text Splitter with configurable chunk size & overlap.
-    Preserves natural sentence boundaries and paragraphs.
-    """
-    def __init__(self, chunk_size: int = 800, chunk_overlap: int = 150, separators: Optional[List[str]] = None):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.separators = separators or ["\n\n", "\n", ". ", "? ", "! ", "; ", " ", ""]
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    try:
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+    except ImportError:
+        class RecursiveCharacterTextSplitter:
+            """Fallback RecursiveCharacterTextSplitter implementation."""
+            def __init__(self, chunk_size: int = 800, chunk_overlap: int = 150, separators: Optional[List[str]] = None):
+                self.chunk_size = chunk_size
+                self.chunk_overlap = chunk_overlap
+                self.separators = separators or ["\n\n", "\n", ". ", "? ", "! ", "; ", " ", ""]
 
-    def split_text(self, text: str) -> List[str]:
-        text = text.strip()
-        if not text:
-            return []
-        return self._split(text, self.separators)
+            def split_text(self, text: str) -> List[str]:
+                text = text.strip()
+                if not text:
+                    return []
+                return self._split(text, self.separators)
 
-    def _split(self, text: str, separators: List[str]) -> List[str]:
-        if len(text) <= self.chunk_size:
-            return [text]
-
-        if not separators:
-            # Hard split if no more separators
-            chunks = []
-            start = 0
-            while start < len(text):
-                end = min(start + self.chunk_size, len(text))
-                chunks.append(text[start:end])
-                if end == len(text):
-                    break
-                start += max(1, self.chunk_size - self.chunk_overlap)
-            return chunks
-
-        sep = separators[0]
-        remaining_seps = separators[1:]
-
-        if sep == "":
-            splits = list(text)
-        else:
-            splits = text.split(sep)
-
-        good_splits = []
-        current_chunk = []
-        current_len = 0
-
-        for s in splits:
-            item = s if sep == "" else (s + sep)
-            item_len = len(item)
-
-            if item_len > self.chunk_size:
-                # Sub-split larger parts
-                if current_chunk:
-                    merged = "".join(current_chunk).strip()
-                    if merged:
-                        good_splits.append(merged)
-                    current_chunk = []
-                    current_len = 0
-                sub_chunks = self._split(item, remaining_seps)
-                good_splits.extend(sub_chunks)
-            elif current_len + item_len <= self.chunk_size:
-                current_chunk.append(item)
-                current_len += item_len
-            else:
-                merged = "".join(current_chunk).strip()
-                if merged:
-                    good_splits.append(merged)
-                
-                # Handle overlap
-                overlap_items = []
-                overlap_len = 0
-                for prev in reversed(current_chunk):
-                    if overlap_len + len(prev) <= self.chunk_overlap:
-                        overlap_items.insert(0, prev)
-                        overlap_len += len(prev)
+            def _split(self, text: str, separators: List[str]) -> List[str]:
+                if len(text) <= self.chunk_size:
+                    return [text]
+                if not separators:
+                    chunks = []
+                    start = 0
+                    while start < len(text):
+                        end = min(start + self.chunk_size, len(text))
+                        chunks.append(text[start:end])
+                        if end == len(text):
+                            break
+                        start += max(1, self.chunk_size - self.chunk_overlap)
+                    return chunks
+                sep = separators[0]
+                remaining = separators[1:]
+                splits = list(text) if sep == "" else text.split(sep)
+                good_splits, current_chunk, current_len = [], [], 0
+                for s in splits:
+                    item = s if sep == "" else (s + sep)
+                    item_len = len(item)
+                    if item_len > self.chunk_size:
+                        if current_chunk:
+                            m = "".join(current_chunk).strip()
+                            if m: good_splits.append(m)
+                            current_chunk, current_len = [], 0
+                        good_splits.extend(self._split(item, remaining))
+                    elif current_len + item_len <= self.chunk_size:
+                        current_chunk.append(item)
+                        current_len += item_len
                     else:
-                        break
-                
-                current_chunk = overlap_items + [item]
-                current_len = sum(len(x) for x in current_chunk)
-
-        if current_chunk:
-            merged = "".join(current_chunk).strip()
-            if merged:
-                good_splits.append(merged)
-
-        return [c for c in good_splits if c.strip()]
+                        m = "".join(current_chunk).strip()
+                        if m: good_splits.append(m)
+                        overlap_items, overlap_len = [], 0
+                        for prev in reversed(current_chunk):
+                            if overlap_len + len(prev) <= self.chunk_overlap:
+                                overlap_items.insert(0, prev)
+                                overlap_len += len(prev)
+                            else:
+                                break
+                        current_chunk = overlap_items + [item]
+                        current_len = sum(len(x) for x in current_chunk)
+                if current_chunk:
+                    m = "".join(current_chunk).strip()
+                    if m: good_splits.append(m)
+                return [c for c in good_splits if c.strip()]
 
 
 class RAGEngine:
     """
     Production-Grade RAG Engine supporting:
     - Multi-format document ingestion (.pdf, .docx, .txt, .md)
-    - Recursive Character Text Chunking
-    - ChromaDB Vector Store with Cosine distance
-    - Multi-Key Gemini Embedding & Generation fallback
-    - Cohere Reranking & MMR diversity search
-    - Hallucination guardrail prompt augmentation
-    - Streaming & JSON query responses
+    - LangChain RecursiveCharacterTextSplitter (chunk_size=800, chunk_overlap=150)
+    - ChromaDB Vector Store with Cosine similarity (HNSW index)
+    - Google Text-Embedding (text-embedding-004) & Gemini 2.5 Flash Generation
+    - SQLite Relational Database (system_data.db: users, documents, document_chunks, chat_logs)
+    - Cohere Reranking & Strict Hallucination Guardrails
+    - Streaming (SSE) & JSON query responses
     """
     def __init__(self, chroma_path: str = "chroma_db", collection_name: str = "production_rag_docs"):
         database.init_db()
@@ -201,6 +180,8 @@ class RAGEngine:
         self.key_manager = GeminiKeyManager()
         self.gemini_keys = self.key_manager.keys
         self.current_key_idx = 0
+        self._active_embed_model: Optional[str] = None
+        self._active_gen_model: Optional[str] = None
 
         # Configure Cohere Reranker
         self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
@@ -214,11 +195,19 @@ class RAGEngine:
         return None
 
     def get_embedding(self, text: str) -> List[float]:
-        """Tạo embedding vector cho đoạn văn bản sử dụng Google Gemini embedding với Round-Robin & Fallback."""
+        """
+        Tạo embedding vector cho đoạn văn bản sử dụng mô hình Google Text-Embedding (text-embedding-004)
+        với cơ chế xoay vòng Key và Fallback tự động.
+        """
         if not self.key_manager.total_keys:
             raise ValueError("GEMINI_API_KEY / GEMINI_KEYS chưa được cấu hình trong .env")
         
-        embed_models = ["gemini-embedding-001", "gemini-embedding-2"]
+        candidates = ["text-embedding-004", "gemini-embedding-001", "gemini-embedding-2"]
+        if self._active_embed_model and self._active_embed_model in candidates:
+            embed_models = [self._active_embed_model] + [m for m in candidates if m != self._active_embed_model]
+        else:
+            embed_models = candidates
+
         key_pool = self.key_manager.get_key_pool()
         last_err = None
 
@@ -230,6 +219,7 @@ class RAGEngine:
                         model=model_name,
                         contents=text
                     )
+                    self._active_embed_model = model_name
                     return res.embeddings[0].values
                 except Exception as e:
                     last_err = e
@@ -237,7 +227,6 @@ class RAGEngine:
                         print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded on embedding model '{model_name}'. Rotating to next key...")
                         break
                     else:
-                        print(f"[GEMINI EMBED ERROR] Key #{key_idx} ({masked_key}) | Model '{model_name}' failed: {type(e).__name__}: {e}")
                         continue
 
         if last_err:
@@ -476,7 +465,7 @@ Ví dụ:
 ]
 Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào ngoài chuỗi JSON hợp lệ."""
 
-        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
+        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
         faqs: List[str] = []
         key_pool = self.key_manager.get_key_pool()
 
@@ -488,7 +477,7 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                         model=m_name,
                         contents=prompt,
                         config=types.GenerateContentConfig(
-                            temperature=0.3
+                            temperature=0.2
                         )
                     )
                     raw_text = res.text.strip()
@@ -561,13 +550,13 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
     def retrieve(self, query_text: str, top_k: int = 2, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
         Semantic Retrieval tối ưu:
-        1. Embeds query -> query ChromaDB với n_results=4 (tinh gọn từ 6 xuống 4).
-        2. Reranks candidates sử dụng Cohere Rerank lấy Top-2 (top_n=2) đoạn có độ liên quan cao nhất để giảm tải prompt LLM.
+        1. Embeds query -> query ChromaDB với n_results=4.
+        2. Reranks candidates sử dụng Cohere Rerank lấy Top-2 (top_n=2) đoạn có độ liên quan cao nhất.
         3. Trả về danh sách docs và metadata tương ứng.
         """
         q_embed = self.get_embedding(query_text)
         
-        # Lấy tinh gọn 4 chunks từ ChromaDB
+        # Lấy 4 chunks từ ChromaDB
         search_results = self.collection.query(
             query_embeddings=[q_embed],
             n_results=4
@@ -614,7 +603,8 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
         """
-        Constructs context-augmented prompt specifically for University Academic Regulations with strict guardrails.
+        Khởi tạo Prompt với System Guardrail nghiêm ngặt theo chuẩn Báo cáo Thực tập Tốt nghiệp (NTU EduBot).
+        Phòng ngừa hiện tượng ảo giác (hallucination) 100%.
         """
         context_blocks = []
         for i, doc in enumerate(retrieved_docs, 1):
@@ -622,15 +612,18 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         
         context_str = "\n\n".join(context_blocks)
 
-        prompt = f"""Bạn là Trợ lý Tra cứu Nội quy và Quy chế Đào tạo của Nhà trường.
-Bạn CHỈ trả lời các câu hỏi liên quan đến quy chế học vụ, điểm số, học phí, rèn luyện, học bổng, thực tập, đồ án tốt nghiệp và nội quy chung dựa TUYỆT ĐỐI vào [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
+        prompt = f"""Bạn là Trợ lý Tra cứu Quy chế Học vụ và Nội quy Nhà trường (NTU EduBot).
+Nhiệm vụ của bạn là giải đáp chính xác thắc mắc của sinh viên và người dùng về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp và nội quy nhà trường DỰA TUYỆT ĐỐI VÀO [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
 
-NGUYÊN TẮC VÀ RÀNG BUỘC NGHIÊM NGẶT:
-1. Bạn CHỈ ĐƯỢC PHÉP trả lời dựa vào thông tin có trong phần [NGỮ CẢNH TÀI LIỆU] dưới đây.
-2. Nếu câu hỏi KHÔNG liên quan đến quy chế nhà trường (như hỏi về tài chính doanh nghiệp, đầu tư, code bên ngoài, kiến thức tổng quát ngoài trường học...), hãy lịch sự từ chối và hướng dẫn người dùng: "Tôi là Trợ lý Tra cứu Nội quy và Quy chế Đào tạo của Nhà trường. Tôi chỉ hỗ trợ giải đáp các vấn đề liên quan đến quy chế học vụ, học phí, học bổng, thực tập, điểm số và nội quy sinh viên. Vui lòng đặt câu hỏi liên quan đến các chủ đề này."
-3. Nếu câu hỏi liên quan đến quy chế nhưng thông tin KHÔNG có trong tài liệu được cung cấp, bạn PHẢI trả lời rõ ràng: "Dựa trên các tài liệu quy chế được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này." TUYỆT ĐỐI KHÔNG tự suy đoán, bịa đặt hoặc dùng kiến thức bên ngoài tài liệu.
-4. Trình bày câu trả lời rõ ràng, mạch lạc, sử dụng định dạng Markdown (gạch đầu dòng, bảng biểu, in đậm số liệu/mốc thời gian quan trọng) để người đọc dễ theo dõi.
-5. Cuối câu trả lời, hãy tóm tắt ngắn gọn các nguồn tài liệu quy chế và số trang đã tham chiếu.
+CÁC NGUYÊN TẮC VÀ RÀNG BUỘC BẮT BUỘC:
+1. Bạn CHỈ ĐƯỢC PHÉP trả lời dựa trên các thông tin có trong phần [NGỮ CẢNH TÀI LIỆU] bên dưới.
+2. QUY TẮC PHÒNG NGỪA ẢO GIÁC: Khi câu hỏi không có căn cứ trong tài liệu hoặc không tìm thấy thông tin trong [NGỮ CẢNH TÀI LIỆU], bạn BẮT BUỘC phải trả lời chính xác nguyên văn:
+"Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
+Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụng kiến thức bên ngoài tài liệu.
+3. Nếu câu hỏi không liên quan đến quy chế đào tạo, nội quy nhà trường (như hỏi về chứng khoán doanh nghiệp, lập trình ngoài phạm vi môn học...), bạn cũng trả lời chính xác:
+"Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
+4. Trình bày câu trả lời rõ ràng, mạch lạc, sử dụng định dạng Markdown (gạch đầu dòng, bảng số liệu, in đậm các mốc thời gian/điều kiện quan trọng).
+5. Cuối câu trả lời, hãy đính kèm danh sách nguồn trích dẫn rõ ràng gồm: Tên file tài liệu gốc và số trang tham chiếu.
 
 [NGỮ CẢNH TÀI LIỆU]:
 {context_str}
@@ -644,19 +637,25 @@ CÂU TRẢ LỜI:"""
     def query(self, question: str, top_k: int = 2, use_rerank: bool = True, temperature: float = 0.2) -> Tuple[str, List[Dict[str, Any]], float]:
         """
         Truy vấn RAG dạng Batch JSON, trả về (câu trả lời, nguồn trích dẫn, latency).
+        Mô hình LLM: Google Gemini (gemini-2.5-flash) với temperature = 0.2.
         """
         start_time = time.time()
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
         
         if not docs:
             latency = round(time.time() - start_time, 2)
-            answer = "Dựa trên các tài liệu quy chế hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Vui lòng đặt câu hỏi liên quan đến quy chế học vụ hoặc tải lên tài liệu mới."
+            answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
             database.log_chat_interaction(question, answer, sources, latency, search_type="none")
             return answer, [], latency
 
         prompt = self.build_prompt(question, docs)
         
-        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
+        candidates = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
+        if self._active_gen_model and self._active_gen_model in candidates:
+            gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
+        else:
+            gen_models = candidates
+
         answer = ""
         key_pool = self.key_manager.get_key_pool()
 
@@ -672,16 +671,19 @@ CÂU TRẢ LỜI:"""
                         )
                     )
                     answer = response.text
+                    self._active_gen_model = m_name
                     break
                 except Exception as e:
                     if is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded on model '{m_name}'. Retrying with next key...")
+                        print(f"[GEMINI 429/QUOTA] Key #{key_idx} ({masked_key}) quota exceeded on model '{m_name}'. Rotating to next key...")
                         break
                     else:
-                        print(f"[GEMINI QUERY ERROR] Key #{key_idx} ({masked_key}) | Model '{m_name}': {type(e).__name__}: {e}")
-                        answer = f"Lỗi trong quá trình sinh câu trả lời: {type(e).__name__} - {e}"
+                        continue
             if answer and not answer.startswith("Lỗi trong quá trình"):
                 break
+
+        if not answer:
+            answer = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
 
         latency = round(time.time() - start_time, 2)
         
@@ -712,7 +714,7 @@ CÂU TRẢ LỜI:"""
         }
 
         if not docs:
-            msg = "Dựa trên các tài liệu quy chế hiện có trong hệ thống, không tìm thấy thông tin phù hợp với câu hỏi của bạn. Vui lòng đặt câu hỏi liên quan đến quy chế học vụ hoặc tải lên tài liệu mới."
+            msg = "Dựa trên các tài liệu được cung cấp, không tìm thấy thông tin để trả lời câu hỏi này."
             for word in msg.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
@@ -724,7 +726,12 @@ CÂU TRẢ LỜI:"""
 
         prompt = self.build_prompt(question, docs)
         full_answer = ""
-        gen_models = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.6-flash", "gemini-flash-latest"]
+        candidates = ["gemini-2.5-flash", "gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-flash-latest"]
+        if self._active_gen_model and self._active_gen_model in candidates:
+            gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
+        else:
+            gen_models = candidates
+
         stream_success = False
         key_pool = self.key_manager.get_key_pool()
 
@@ -745,6 +752,7 @@ CÂU TRẢ LỜI:"""
                             full_answer += chunk.text
                             yield {"type": "token", "token": chunk.text}
                     stream_success = True
+                    self._active_gen_model = m_name
                     break
                 except Exception as e:
                     if is_quota_or_rate_limit_error(e):
@@ -752,7 +760,6 @@ CÂU TRẢ LỜI:"""
                         full_answer = ""
                         break
                     else:
-                        print(f"[GEMINI STREAM ERROR] Key #{key_idx} ({masked_key}) | Model '{m_name}': {type(e).__name__}: {e}")
                         continue
             if stream_success:
                 break

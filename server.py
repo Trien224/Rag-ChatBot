@@ -1,57 +1,51 @@
-import asyncio
-from contextlib import asynccontextmanager
-import json
 import os
+import json
 import shutil
+import asyncio
 from typing import List
-
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+# pyrefly: ignore [missing-import]
 from fastapi.staticfiles import StaticFiles
+
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field
 
-import data as database
 from rag_engine import RAGEngine
+import data as database
 
-# =====================================================================
-# PATHS & CONFIGURATION
-# =====================================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = os.path.join(BASE_DIR, "docs")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
-FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
-ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
-
+# Ensure docs and static directories exist
+DOCS_DIR = os.path.abspath("docs")
 os.makedirs(DOCS_DIR, exist_ok=True)
+STATIC_DIR = os.path.abspath("static")
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-# Initialize RAGEngine Singleton
+# Initialize RAGEngine singleton
 rag = RAGEngine()
 
-
+# Lifespan context manager for startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Quản lý vòng đời ứng dụng: Khởi tạo CSDL SQLite & Vector Store khi khởi động."""
     database.init_db()
     try:
         count = rag.collection.count()
         if count == 0:
-            print("[INFO] ChromaDB trống. Đang quét và nạp tài liệu ban đầu từ thư mục docs/...")
+            print("[INFO] ChromaDB collection is empty. Scanning docs folder for initial documents...")
             rag.ingest_docs_folder(DOCS_DIR)
-            print(f"[INFO] Nạp dữ liệu hoàn tất. Tổng số vector hiện tại: {rag.collection.count()}")
+            print(f"[INFO] Initial ingestion complete. Total vectors: {rag.collection.count()}")
         else:
-            print(f"[INFO] ChromaDB đã sẵn sàng với {count} vector chunks.")
+            print(f"[INFO] ChromaDB initialized with {count} existing chunks.")
     except Exception as e:
-        print(f"[WARNING] Thông báo nạp tài liệu khởi động: {e}")
+        print(f"[WARNING] Startup initial ingestion notice: {e}")
     yield
 
-
 app = FastAPI(
-    title="NTU EduBot - Production RAG API",
-    description="Hệ thống Trợ lý Học vụ RAG Đa phương thức cho Trường Đại học Nha Trang (NTU)",
+    title="Production RAG Document Q&A API",
+    description="End-to-End Retrieval-Augmented Generation (RAG) Document Assistant with FastAPI & ChromaDB",
     version="2.0.0",
-    lifespan=lifespan,
+    lifespan=lifespan
 )
 
 # Enable CORS for all origins
@@ -283,14 +277,14 @@ async def clear_system(req: ClearRequest):
         raise HTTPException(status_code=400, detail="Mục tiêu không hợp lệ ('history', 'documents', 'all').")
 
 
-# =====================================================================
-# STATIC FILES & FRONTEND ROUTING
-# =====================================================================
+# Static Files & Frontend Routing
+FRONTEND_DIST_DIR = os.path.abspath("frontend/dist")
+ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
+
 if os.path.exists(ASSETS_DIR):
     app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
@@ -298,9 +292,8 @@ async def serve_index():
     react_index = os.path.join(FRONTEND_DIST_DIR, "index.html")
     if os.path.exists(react_index):
         return FileResponse(react_index)
-
+        
     static_index = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(static_index):
         return FileResponse(static_index)
     return HTMLResponse("<h1>RAG Backend Running. Giao diện đang được nạp...</h1>")
-
