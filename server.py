@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field
 
-from rag_engine import RAGEngine
+from rag_engine import RAGEngine, FRIENDLY_OVERLOAD_MESSAGE
 import data as database
 
 # Ensure docs and static directories exist
@@ -284,28 +284,35 @@ async def query_rag(req: QueryRequest):
     if req.stream:
         async def event_stream():
             loop = asyncio.get_event_loop()
-            generator = rag.query_stream(
-                question=question,
-                top_k=req.top_k,
-                use_rerank=req.use_rerank,
-                temperature=req.temperature,
-                session_id=session_id
-            )
+            try:
+                generator = rag.query_stream(
+                    question=question,
+                    top_k=req.top_k,
+                    use_rerank=req.use_rerank,
+                    temperature=req.temperature,
+                    session_id=session_id
+                )
 
-            # Run synchronous generator in worker thread to prevent event loop blocking
-            def get_next():
-                try:
-                    return next(generator)
-                except StopIteration:
-                    return None
+                # Run synchronous generator in worker thread to prevent event loop blocking
+                def get_next():
+                    try:
+                        return next(generator)
+                    except StopIteration:
+                        return None
 
-            while True:
-                item = await loop.run_in_executor(None, get_next)
-                if item is None:
-                    break
-                
-                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.005)
+                while True:
+                    item = await loop.run_in_executor(None, get_next)
+                    if item is None:
+                        break
+                    
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.005)
+            except Exception as e:
+                print(f"[QUERY STREAM UNEXPECTED ERROR] {e}")
+                err_payload = {"type": "token", "token": FRIENDLY_OVERLOAD_MESSAGE}
+                yield f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+                done_payload = {"type": "done", "latency": 0.0, "full_text": FRIENDLY_OVERLOAD_MESSAGE}
+                yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             event_stream(),
@@ -318,19 +325,28 @@ async def query_rag(req: QueryRequest):
         )
     else:
         # Non-streaming JSON response
-        answer, sources, latency = rag.query(
-            question=question,
-            top_k=req.top_k,
-            use_rerank=req.use_rerank,
-            temperature=req.temperature,
-            session_id=session_id
-        )
-        return {
-            "question": question,
-            "answer": answer,
-            "sources": sources,
-            "latency": latency
-        }
+        try:
+            answer, sources, latency = rag.query(
+                question=question,
+                top_k=req.top_k,
+                use_rerank=req.use_rerank,
+                temperature=req.temperature,
+                session_id=session_id
+            )
+            return {
+                "question": question,
+                "answer": answer,
+                "sources": sources,
+                "latency": latency
+            }
+        except Exception as e:
+            print(f"[QUERY NON-STREAM UNEXPECTED ERROR] {e}")
+            return {
+                "question": question,
+                "answer": FRIENDLY_OVERLOAD_MESSAGE,
+                "sources": [],
+                "latency": 0.0
+            }
 
 
 @app.get("/api/history")
@@ -362,12 +378,32 @@ async def clear_system(req: ClearRequest):
 
 # Static Files & Frontend Routing
 FRONTEND_DIST_DIR = os.path.abspath("frontend/dist")
+FRONTEND_PUBLIC_DIR = os.path.abspath("frontend/public")
 ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 
 if os.path.exists(ASSETS_DIR):
     app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+@app.get("/favicon.svg")
+async def get_favicon_svg():
+    """Phục vụ file SVG Favicon chính thức của NTU EduBot."""
+    dist_fav = os.path.join(FRONTEND_DIST_DIR, "favicon.svg")
+    if os.path.exists(dist_fav):
+        return FileResponse(dist_fav, media_type="image/svg+xml")
+    pub_fav = os.path.join(FRONTEND_PUBLIC_DIR, "favicon.svg")
+    if os.path.exists(pub_fav):
+        return FileResponse(pub_fav, media_type="image/svg+xml")
+    stat_fav = os.path.join(STATIC_DIR, "favicon.svg")
+    if os.path.exists(stat_fav):
+        return FileResponse(stat_fav, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
+@app.get("/favicon.ico")
+async def get_favicon_ico():
+    """Fallback cho trình duyệt tự động request /favicon.ico."""
+    return await get_favicon_svg()
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
