@@ -135,7 +135,7 @@ export const DocumentDrawer: React.FC<DocumentDrawerProps> = React.memo(({
                 <span className="font-bold text-slate-900 dark:text-white font-mono text-sm">{documents.length}</span>
               </div>
               <div className="p-2.5 rounded-xl bg-white dark:bg-dark-900 border border-slate-200 dark:border-slate-800 text-center shadow-sm">
-                <span className="text-slate-500 dark:text-slate-400 text-[11px] block">Tổng Chunks</span>
+                <span className="text-slate-500 dark:text-slate-400 text-[11px] block">Tổng văn bản trích (Chunk)</span>
                 <span className="font-bold text-indigo-600 dark:text-indigo-400 font-mono text-sm">{totalChunks}</span>
               </div>
               <div className="p-2.5 rounded-xl bg-white dark:bg-dark-900 border border-slate-200 dark:border-slate-800 text-center shadow-sm">
@@ -259,7 +259,7 @@ export const DocumentDrawer: React.FC<DocumentDrawerProps> = React.memo(({
                             <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                               <span>{formatBytes(doc.file_size)}</span>
                               <span>•</span>
-                              <span>{doc.chunk_count || 0} chunks</span>
+                              <span>{doc.chunk_count || 0} đoạn trích</span>
                               <span>•</span>
                               {doc.status === 'indexed' ? (
                                 <span className="flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 font-medium">
