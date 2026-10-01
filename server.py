@@ -43,6 +43,17 @@ async def lifespan(app: FastAPI):
     """Application lifespan context for startup checks and document index synchronization."""
     database.init_db()
     try:
+        # Log active Gemini keys and Cohere configuration
+        total_keys = rag.key_manager.total_keys
+        masked_summary = rag.key_manager.get_masked_keys_summary()
+        print(f"[STARTUP] Đã nạp {total_keys} Gemini keys: {masked_summary}")
+
+        if rag.cohere_key:
+            masked_cohere = f"...{rag.cohere_key[-6:]}" if len(rag.cohere_key) >= 6 else "***"
+            print(f"[STARTUP] Cohere Reranker: Đã kích hoạt ({masked_cohere})")
+        else:
+            print("[STARTUP] Cohere Reranker: Chưa cấu hình (sử dụng Cosine Similarity mặc định)")
+
         total_vectors = 0
         try:
             total_vectors = rag.collection.count()
@@ -227,7 +238,8 @@ async def upload_documents(
                 file_path=dest_path,
                 original_filename=safe_filename,
                 chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
+                chunk_overlap=chunk_overlap,
+                force_reload=True
             )
             processed_results.append(res)
         except Exception as e:
@@ -236,6 +248,9 @@ async def upload_documents(
                 "status": "error",
                 "error": str(e)
             })
+
+    # Synchronize and reload ChromaDB collection state immediately
+    rag.reload_collection()
 
     return {
         "message": f"Đã xử lý {len(files)} tệp tin.",

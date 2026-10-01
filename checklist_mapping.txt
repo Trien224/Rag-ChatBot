@@ -1,0 +1,113 @@
+================================================================================
+BẢNG ÁNH XẠ HẠNG MỤC CÔNG VIỆC VÀ TỆP MÃ NGUỒN (CHECKLIST MAPPING)
+Dự án: NTU EduBot - AI Tra cứu Quy chế Học vụ RAG
+================================================================================
+
+B. XỬ LÝ TÀI LIỆU ĐẦU VÀO (DATA INGESTION)
+--------------------------------------------------------------------------------
+8. Tải lên tài liệu:
+   - File thực hiện: server.py, frontend/src/components/DocumentDeleteModal.tsx
+   - Endpoint / Hàm: POST /api/upload, upload_file()
+
+9. Trích xuất văn bản từ PDF:
+   - File thực hiện: data.py, rag_engine.py
+   - Hàm / Thư viện: extract_text_from_pdf(), pypdf / pdfplumber
+
+10. Làm sạch & tiền xử lý:
+   - File thực hiện: data.py, rag_engine.py
+   - Hàm / Xử lý: clean_text(), tiền xử lý chuẩn hóa ký tự utf-8, xóa khoảng trắng thừa
+
+11. Chia nhỏ văn bản (Chunking):
+   - File thực hiện: data.py, rag_engine.py
+   - Hàm / Tham số: chunk_text(), cấu hình Chunk Size (800 ký tự) & Chunk Overlap (150 ký tự)
+
+12. Gắn metadata:
+   - File thực hiện: data.py, rag_engine.py
+   - Chi tiết: Gắn source_file, page_number, chunk_id vào từng Document chunk
+
+C. XỬ LÝ AI - RAG PIPELINE
+--------------------------------------------------------------------------------
+13. Tạo vector embedding cho đoạn văn:
+   - File thực hiện: rag_engine.py
+   - Mô hình / Hàm: gemini-embedding-001 / text-embedding-004
+
+14. Thiết lập Vector Database:
+   - File thực hiện: rag_engine.py, database.py
+   - Cấu hình: ChromaDB PersistentClient lưu tại thư mục chroma_db/
+
+15. Lưu trữ vector + metadata:
+   - File thực hiện: rag_engine.py
+   - Hàm: collection.add(documents, embeddings, metadatas, ids)
+
+16. Tạo embedding cho câu hỏi:
+   - File thực hiện: rag_engine.py
+   - Hàm: embed_query() khi nhận câu hỏi từ người dùng
+
+17. Tìm kiếm ngữ nghĩa (Semantic search) & Rerank:
+   - File thực hiện: rag_engine.py
+   - Hàm / Cơ chế: collection.query(), kết hợp Cohere Rerank v3.5 (COHERE_API_KEY)
+
+18. Streaming Response:
+   - File thực hiện: server.py, frontend/src/
+   - Cơ chế: SSE (Server-Sent Events) tại POST /api/chat/stream hoặc WebSocket
+
+19. Ghép Prompt với ngữ cảnh:
+   - File thực hiện: rag_engine.py
+   - Chi tiết: Template prompt kết hợp bối cảnh tài liệu trích xuất và câu hỏi
+
+20. Gọi API LLM:
+   - File thực hiện: rag_engine.py
+   - Mô hình: Gemini API (gemini-2.5-flash / gemini-3.7-flash) qua xoay vòng GEMINI_KEYS
+
+21. Trích dẫn nguồn:
+   - File thực hiện: rag_engine.py, frontend/src/
+   - Dữ liệu trả về: Tên file nguồn (source), số trang (page), độ tương đồng / relevance_score
+
+22. Xử lý thiếu thông tin (Fallback):
+   - File thực hiện: rag_engine.py
+   - Logic: Prompt quy định nghiêm ngặt từ chối bịa đặt và fallback khi độ tương đồng thấp
+
+D. CƠ SỞ DỮ LIỆU
+--------------------------------------------------------------------------------
+23. CSDL lưu tài liệu:
+   - File thực hiện: database.py
+   - Bảng: documents (id, filename, file_size, page_count, created_at)
+
+24. CSDL lưu lịch sử:
+   - File thực hiện: database.py, server.py
+   - Bảng: chat_logs / conversations (session_id, user_query, bot_response, created_at)
+
+25. Thiết lập Vector Database:
+   - File thực hiện: rag_engine.py
+   - Lưu trữ: Thư mục vật lý chroma_db/ dùng hnsw:space cosine
+
+26. Kết nối SQLite:
+   - File thực hiện: database.py
+   - Tệp cơ sở dữ liệu: system_data.db (kết nối qua sqlite3 / SQLAlchemy)
+
+E. TÍCH HỢP & KIỂM THỬ
+--------------------------------------------------------------------------------
+27. Kết nối API Gemini:
+   - File thực hiện: rag_engine.py, .env
+   - Xử lý: Quản lý biến môi trường GEMINI_KEYS, cơ chế xoay vòng key chống lỗi 429
+
+28. Kiểm thử độ chính xác:
+   - File thực hiện: test_crud_qa.py, test_rag.py
+   - Kiểm tra: Assert đối soát nội dung câu trả lời chuẩn theo quy chế học vụ
+
+29. Kiểm thử tốc độ phản hồi:
+   - File thực hiện: test_crud_qa.py, test_e2e.py
+   - Chỉ số: Đo lường Latency stream và thời gian xử lý toàn trình (end-to-end)
+
+30. Kiểm thử đa dạng tài liệu:
+   - File thực hiện: test_crud_qa.py, docs/
+   - Tập mẫu: Các file quy chế thực tập, học vụ, học phí trong thư mục docs/
+
+31. Xử lý lỗi:
+   - File thực hiện: server.py, rag_engine.py
+   - Xử lý: Bắt ngoại lệ định dạng file không hỗ trợ, mất kết nối API, lỗi quota 429
+
+32. Chống ảo giác (Hallucination):
+   - File thực hiện: rag_engine.py
+   - Kỹ thuật: Thiết lập system prompt nghiêm ngặt, nhiệt độ Temperature thấp (0.0 - 0.2)
+================================================================================

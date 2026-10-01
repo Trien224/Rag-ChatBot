@@ -45,22 +45,38 @@ OUT_OF_SCOPE_MESSAGE = (
 )
 
 DEFAULT_EMBED_MODELS = [
-    "text-embedding-004",
     "gemini-embedding-001",
+    "text-embedding-004",
+    "models/gemini-embedding-001",
     "models/text-embedding-004",
     "gemini-embedding-2"
 ]
 
 DEFAULT_GEN_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
     "gemini-3.7-flash",
+    "gemini-3.8-flash",
     "gemini-3.5-flash",
-    "gemini-flash-latest",
-    "gemini-3.6-flash",
-    "gemini-3.1-flash-lite"
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest"
 ]
+
+
+def expand_query_variants(query: str) -> str:
+    """Expands query with common abbreviations, inverted terms, and aliases (e.g. LP06 <-> PL06, LP04 <-> PL04)."""
+    expanded = query
+    # Match LP06, LP6, LP-06, LP 06, etc. -> add PL06, PL6, Phụ lục 6, Phụ lục 06
+    lp_matches = re.findall(r'\b(?:lp)[\s\-_]*0*(\d+)\b', query, flags=re.IGNORECASE)
+    for m in lp_matches:
+        num = int(m)
+        expanded += f" PL{num:02d} PL{num} Phụ lục {num} Phụ lục {num:02d} PL-{num:02d}"
+    # Match PL06, PL6, PL-06, PL 06 -> add Phụ lục 6, Phụ lục 06, PL06, PL6
+    pl_matches = re.findall(r'\b(?:pl)[\s\-_]*0*(\d+)\b', query, flags=re.IGNORECASE)
+    for m in pl_matches:
+        num = int(m)
+        expanded += f" Phụ lục {num} Phụ lục {num:02d} PL{num:02d} PL{num}"
+    return expanded.strip()
+
+
 
 
 def is_quota_or_rate_limit_error(e: Exception) -> bool:
@@ -74,7 +90,7 @@ def is_quota_or_rate_limit_error(e: Exception) -> bool:
 
     err_msg = str(e).lower()
     err_type = type(e).__name__.lower()
-    keywords = ["429", "resource_exhausted", "resourceexhausted", "quota", "rate limit", "too many requests", "exhausted"]
+    keywords = ["429", "resource_exhausted", "resourceexhausted", "quota", "rate limit", "too many requests", "exhausted", "quota_exceeded"]
     return any(kw in err_msg or kw in err_type for kw in keywords)
 
 
@@ -122,7 +138,7 @@ def get_gemini_error_info(e: Exception) -> Tuple[int, str]:
 class GeminiKeyManager:
     """
     Thread-safe Round-Robin Key Manager and Cycler for Google Gemini API Keys.
-    Handles key parsing, validation, client instantiation, and request rotation.
+    Handles robust key parsing, normalization, client instantiation, and request rotation.
     """
     def __init__(self, raw_keys_str: Optional[str] = None):
         self.lock = threading.Lock()
@@ -131,9 +147,32 @@ class GeminiKeyManager:
         self._counter: int = 0
         self.load_keys(raw_keys_str)
 
+    @staticmethod
+    def mask_key(k: str) -> str:
+        """Masks key for safe logging, e.g. ...5Kfvuw or ...F8q2Pg."""
+        if not k:
+            return "***"
+        clean = str(k).strip()
+        if len(clean) <= 6:
+            return f"...{clean[-3:]}" if len(clean) >= 3 else "***"
+        return f"...{clean[-6:]}"
+
+    def get_masked_keys_summary(self) -> str:
+        """Returns readable summary of all loaded keys, e.g., '...5Kfvuw, ...F8q2Pg'."""
+        if not self.keys:
+            return "Không có key nào"
+        return ", ".join([self.mask_key(k) for k in self.keys])
+
     def load_keys(self, raw_keys_str: Optional[str] = None) -> None:
         if raw_keys_str is None:
-            raw_keys_str = os.getenv("GEMINI_KEYS", "") or os.getenv("GEMINI_API_KEY", "")
+            raw_sources = []
+            env_keys = os.getenv("GEMINI_KEYS", "").strip()
+            env_single = os.getenv("GEMINI_API_KEY", "").strip()
+            if env_keys:
+                raw_sources.append(env_keys)
+            if env_single and env_single not in raw_sources:
+                raw_sources.append(env_single)
+            raw_keys_str = ",".join(raw_sources)
 
         parsed_keys: List[str] = []
         raw_clean = str(raw_keys_str).strip().strip("[]").strip("()").strip("{}")
@@ -147,7 +186,7 @@ class GeminiKeyManager:
         self.keys = parsed_keys
         self.clients = []
         for idx, k in enumerate(self.keys, 1):
-            masked = f"...{k[-6:]}" if len(k) >= 6 else "***"
+            masked = self.mask_key(k)
             try:
                 client = genai.Client(api_key=k)
                 self.clients.append(client)
@@ -155,7 +194,8 @@ class GeminiKeyManager:
                 code_int, label = get_gemini_error_info(e)
                 print(f"[GeminiKeyManager] Cảnh báo khởi tạo client cho Key #{idx} ({masked}) [{label}]: {e}")
 
-        print(f"[GeminiKeyManager] Đã khởi tạo {len(self.keys)} active Gemini API key(s).")
+        masked_summary = self.get_masked_keys_summary()
+        print(f"[GeminiKeyManager] Đã nạp {len(self.keys)} Gemini keys: {masked_summary}")
 
     @property
     def total_keys(self) -> int:
@@ -167,10 +207,10 @@ class GeminiKeyManager:
             return []
 
         with self.lock:
-            start_idx = self._counter % len(self.keys)
+            start_idx = self._counter % len(self.clients)
             self._counter += 1
 
-        n = len(self.keys)
+        n = len(self.clients)
         return [(self.clients[(start_idx + i) % n], self.keys[(start_idx + i) % n], (start_idx + i) % n) for i in range(n)]
 
 
@@ -279,13 +319,32 @@ class RAGEngine:
         self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
         self.cohere_client = cohere.Client(api_key=self.cohere_key) if self.cohere_key else None
 
+    def reload_collection(self):
+        """Refreshes and syncs ChromaDB collection state from persistent storage, re-initializing client and collection."""
+        try:
+            if hasattr(self.chroma_client, "persist"):
+                self.chroma_client.persist()
+        except Exception:
+            pass
+
+        try:
+            self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
+            self.collection = self.chroma_client.get_or_create_collection(
+                name=self.collection_name,
+                metadata={"hnsw:space": "cosine"}
+            )
+        except Exception as e:
+            print(f"[RELOAD COLLECTION ERROR] {e}")
+
+        return self.collection
+
     @property
     def gemini_client(self) -> Optional[genai.Client]:
         """Provides backward-compatible access to primary client."""
         return self.key_manager.clients[0] if self.key_manager.clients else None
 
     def get_embedding(self, text: str) -> List[float]:
-        """Generates embedding vector with automatic key rotation and model fallback."""
+        """Generates embedding vector with automatic key rotation, backoff, and model fallback."""
         if not self.key_manager.total_keys:
             raise ValueError("GEMINI_API_KEY hoặc GEMINI_KEYS chưa được cấu hình trong .env")
 
@@ -295,12 +354,12 @@ class RAGEngine:
         else:
             embed_models = candidates
 
-        key_pool = self.key_manager.get_key_pool()
         last_err: Optional[Exception] = None
 
-        for client, key, key_idx in key_pool:
-            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
-            for model_name in embed_models:
+        for model_idx, model_name in enumerate(embed_models):
+            key_pool = self.key_manager.get_key_pool()
+            for client, key, key_idx in key_pool:
+                masked_key = self.key_manager.mask_key(key)
                 try:
                     res = client.models.embed_content(
                         model=model_name,
@@ -311,15 +370,18 @@ class RAGEngine:
                 except Exception as e:
                     last_err = e
                     code_int, label = get_gemini_error_info(e)
+                    print(f"[GEMINI EMBED ERROR] Key #{key_idx+1} ({masked_key}) | Model '{model_name}' | Status: {code_int} ({label}) | Chi tiết: {e}")
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Quota exceeded on embedding. Rotating key...")
-                        break
+                        print(f"[GEMINI EMBED ROTATE] Quota/RateLimit trên Key #{key_idx+1}. Chờ 0.5s và xoay sang Key tiếp theo...")
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Key invalid/forbidden. Rotating key...")
-                        break
-                    else:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': {e}")
-                        continue
+                        print(f"[GEMINI EMBED ROTATE] Key #{key_idx+1} không hợp lệ hoặc bị cấm ({label}). Chuyển sang Key tiếp theo...")
+                    time.sleep(0.5)
+                    continue
+
+            next_embed_model = embed_models[model_idx + 1] if model_idx + 1 < len(embed_models) else None
+            if next_embed_model:
+                print(f"[GEMINI EMBED FALLBACK] Tất cả {len(key_pool)} keys đều lỗi với embed model '{model_name}'. Chuyển sang fallback model '{next_embed_model}'...")
+                time.sleep(0.5)
 
         if last_err:
             raise last_err
@@ -494,7 +556,8 @@ class RAGEngine:
                     documents=all_chunks[i:end_i],
                     metadatas=all_metas[i:end_i]
                 )
-            print(f"[INGEST CHROMA] Đã lưu {len(all_ids)} vectors của '{original_filename}' vào ChromaDB.")
+            self.reload_collection()
+            print(f"[INGEST CHROMA] Đã lưu và đồng bộ {len(all_ids)} vectors của '{original_filename}' vào ChromaDB.")
 
         # 4. Generate suggested FAQs
         generated_faqs: List[str] = []
@@ -551,11 +614,10 @@ Ví dụ:
 Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào ngoài chuỗi JSON hợp lệ."""
 
         faqs: List[str] = []
-        key_pool = self.key_manager.get_key_pool()
-
-        for client, key, key_idx in key_pool:
-            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
-            for m_name in DEFAULT_GEN_MODELS:
+        for m_name in DEFAULT_GEN_MODELS:
+            key_pool = self.key_manager.get_key_pool()
+            for client, key, key_idx in key_pool:
+                masked_key = self.key_manager.mask_key(key)
                 try:
                     res = client.models.generate_content(
                         model=m_name,
@@ -574,14 +636,13 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                         break
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
+                    print(f"[GEMINI FAQ ERROR] Key #{key_idx+1} ({masked_key}) | Model '{m_name}' | Status: {code_int} ({label}) | Chi tiết: {e}")
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during FAQ generation. Rotating key...")
-                        break
+                        print(f"[GEMINI FAQ ROTATE] Quota/RateLimit trên Key #{key_idx+1}. Chờ 0.5s và xoay sang Key tiếp theo...")
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden. Rotating key...")
-                        break
-                    else:
-                        continue
+                        print(f"[GEMINI FAQ ROTATE] Key #{key_idx+1} không hợp lệ hoặc bị cấm ({label}). Chuyển sang Key tiếp theo...")
+                    time.sleep(0.5)
+                    continue
             if faqs:
                 break
 
@@ -636,6 +697,7 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                 print(f"  [✗ LỖI NGOẠI LỆ] '{file}': {e}")
                 results.append({"filename": file, "status": "error", "error": str(e)})
 
+        self.reload_collection()
         return results
 
     def delete_document(self, filename: str) -> bool:
@@ -645,6 +707,7 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         except Exception as e:
             print(f"Lỗi khi xóa vector từ Chroma: {e}")
 
+        self.reload_collection()
         return database.delete_document_record(filename)
 
     def clear_all(self) -> bool:
@@ -657,12 +720,13 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"}
         )
+        self.reload_collection()
         database.delete_all_document_records()
         return True
 
     def retrieve(self, query_text: str, top_k: int = 4, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
-        Retrieves top relevant chunks from ChromaDB with optional Cohere Reranking.
+        Retrieves top relevant chunks from ChromaDB with query expansion, document tag matching, and Cohere Reranking.
         """
         total_vectors = 0
         try:
@@ -676,8 +740,9 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
             print(f"[RAG RETRIEVE CẢNH BÁO] ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors).")
             return [], []
 
-        q_embed = self.get_embedding(query_text)
-        fetch_k = min(max(top_k * 2, 4), total_vectors)
+        expanded_query = expand_query_variants(query_text)
+        q_embed = self.get_embedding(expanded_query)
+        fetch_k = min(max(top_k * 3, 6), total_vectors)
 
         try:
             search_results = self.collection.query(
@@ -688,12 +753,9 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
             print(f"[RAG RETRIEVE ERROR] Lỗi khi truy vấn ChromaDB: {e}")
             return [], []
 
-        docs = search_results["documents"][0] if (search_results and search_results.get("documents")) else []
-        metas = search_results["metadatas"][0] if (search_results and search_results.get("metadatas")) else []
-        distances = search_results["distances"][0] if (search_results and search_results.get("distances")) else []
-
-        if not docs:
-            return [], []
+        docs = list(search_results["documents"][0]) if (search_results and search_results.get("documents")) else []
+        metas = list(search_results["metadatas"][0]) if (search_results and search_results.get("metadatas")) else []
+        distances = list(search_results["distances"][0]) if (search_results and search_results.get("distances")) else []
 
         for idx, m in enumerate(metas):
             if idx < len(distances):
@@ -701,6 +763,31 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                 m["distance"] = round(dist, 4)
                 m["similarity"] = round(max(0.0, 1.0 - dist), 4)
             m["content_snippet"] = docs[idx][:200] + ("..." if len(docs[idx]) > 200 else "")
+
+        # Check for direct document tag / abbreviation matches (e.g. LP06/PL06, LP04/PL04) in indexed documents
+        tag_matches = re.findall(r'\b(?:pl|lp)[\s\-_]*0*(\d+)\b', query_text, flags=re.IGNORECASE)
+        if tag_matches:
+            for tag_num in tag_matches:
+                t_int = int(tag_num)
+                target_tags = [f"PL{t_int:02d}", f"PL{t_int}", f"PL-{t_int:02d}", f"Phụ lục {t_int}", f"Phụ lục {t_int:02d}"]
+                try:
+                    all_meta_sample = self.collection.get(include=["documents", "metadatas"])
+                    if all_meta_sample and all_meta_sample.get("documents"):
+                        for doc_text, meta_dict in zip(all_meta_sample["documents"], all_meta_sample["metadatas"]):
+                            src = str(meta_dict.get("source", "")) if meta_dict else ""
+                            matched = any(tag.lower() in src.lower() or tag.lower() in doc_text[:100].lower() for tag in target_tags)
+                            if matched and doc_text not in docs:
+                                m = dict(meta_dict or {})
+                                m["similarity"] = 0.90
+                                m["distance"] = 0.10
+                                m["content_snippet"] = doc_text[:200] + ("..." if len(doc_text) > 200 else "")
+                                docs.insert(0, doc_text)
+                                metas.insert(0, m)
+                except Exception as ex:
+                    print(f"[RAG RETRIEVE TAG BOOST] {ex}")
+
+        if not docs:
+            return [], []
 
         # Rerank with Cohere if available
         if use_rerank and self.cohere_client and len(docs) > 1:
@@ -727,29 +814,32 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         return docs[:top_k], metas[:top_k]
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
-        """Constructs prompt with guardrails and conversational style."""
+        """Constructs prompt with flexible context understanding, abbreviation handling, and conversational style."""
         context_blocks = [f"[ĐOẠN TRÍCH {i}]\n{doc}" for i, doc in enumerate(retrieved_docs, 1)]
         context_str = "\n\n".join(context_blocks)
 
-        return f"""Bạn là NTU EduBot - một người bạn đại học đồng hành thông minh, thân thiện và nhiệt tình của các bạn sinh viên Đại học Nha Trang (NTU).
-Nhiệm vụ của bạn là giải đáp thắc mắc của sinh viên về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp và nội quy nhà trường DỰA TUYỆT ĐỐI VÀO [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
+        return f"""Bạn là NTU EduBot - một người bạn đại học đồng hành thông minh, thân thiện, chu đáo và nhiệt tình của các bạn sinh viên Đại học Nha Trang (NTU) và người dùng tra cứu thông tin học vụ, quy chế, kế hoạch và tài liệu liên quan.
+Nhiệm vụ của bạn là giải đáp thắc mắc, tóm tắt và hướng dẫn DỰA TRÊN [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
 
-CÁC NGUYÊN TẮC GIAO TIẾP VÀ RÀNG BUỘC BẮT BUỘC:
+CÁC NGUYÊN TẮC GIAO TIẾP VÀ HƯỚNG DẪN XỬ LÝ BẮT BUỘC:
 1. XƯNG HÔ VÀ GIỌNG ĐIỆU THÂN THIỆN:
    - Luôn xưng hô là "tớ" và gọi người dùng là "cậu" như một người bạn đại học đồng hành gần gũi, ấm áp, nhiệt tình và lịch sự.
-   - Giữ câu văn tự nhiên, ấm áp, tránh lối nói máy móc, cứng nhắc hoặc quá trang nghiêm.
+   - Trình bày câu trả lời rõ ràng, mạch lạc bằng các gạch đầu dòng ngắn gọn, bôi đậm các từ khóa hoặc mốc thông tin quan trọng.
 
-2. CẤU TRÚC VÀ TRÌNH BÀY CÂU TRẢ LỜI:
-   - Trả lời đúng trọng tâm câu hỏi dựa trên thông tin trong [NGỮ CẢNH TÀI LIỆU].
-   - Luôn trình bày câu trả lời rõ ràng bằng các gạch đầu dòng ngắn gọn.
-   - Trích dẫn chính xác tên tài liệu hoặc điều khoản, số trang tham chiếu nếu có trong ngữ cảnh.
+2. NHẬN DIỆN BIẾN THỂ VIẾT TẮT & ĐẢO CHỮ:
+   - Chấp nhận các biến thể viết tắt hoặc đảo chữ của người dùng (ví dụ: LP04/PL04, LP06/PL06, Phụ lục 4/Phụ lục 6, ĐTT/Đinh Tiến Triển, TTTN/Thực tập tốt nghiệp, CNTT & CĐS...).
+   - Nếu người dùng hỏi "LP06", "tài liệu LP06", tự động hiểu và liên kết với bối cảnh từ file/biểu mẫu "PL06" hoặc "Phụ lục 06" có trong context.
 
-3. QUY TẮC BẢO VỆ VÀ XỬ LÝ KHI THIẾU THÔNG TIN (GUARDRAILS):
-   - Khi câu hỏi không có căn cứ trong tài liệu hoặc không tìm thấy thông tin trong [NGỮ CẢNH TÀI LIỆU], hãy trả lời chính xác nguyên văn câu sau:
+3. ƯU TIÊN PHÂN TÍCH VÀ GIẢI THÍCH NỘI DUNG TÀI LIỆU MỚI NẠP:
+   - Ưu tiên phân tích và giải thích nội dung dựa trên các đoạn trích từ tài liệu mới nạp được cung cấp trong [NGỮ CẢNH TÀI LIỆU].
+   - Nếu context chứa văn bản của biểu mẫu/tài liệu đó, hãy trích xuất công dụng và mục đích sử dụng, thông tin người thực hiện, cơ quan tiếp nhận và kế hoạch công việc để trả lời ngay lập tức, KHÔNG ĐƯỢC TỪ CHỐI nếu context có dữ liệu.
+
+4. QUY TẮC BẢO VỆ VÀ XỬ LÝ KHI THIẾU THÔNG TIN (GUARDRAILS):
+   - Chỉ đưa ra thông tin có căn cứ từ [NGỮ CẢNH TÀI LIỆU], không tự bịa đặt số liệu hoặc suy diễn sai lệch ngoài tài liệu.
+   - CHỈ trả lời chính xác nguyên văn câu sau khi [NGỮ CẢNH TÀI LIỆU] HOÀN TOÀN TRỐNG RỖNG hoặc 100% KHÔNG CHỨA BẤT KỲ THÔNG TIN NÀO liên quan đến câu hỏi:
    "{NO_INFO_FALLBACK_MESSAGE}"
-   - Với các câu hỏi hoàn toàn ngoài lề, nhạy cảm hoặc không được phép (như chứng khoán, giải trí ngoài lề, chính trị, xúc phạm...), hãy trả lời chính xác:
+   - Với các câu hỏi hoàn toàn ngoài lề, nhạy cảm hoặc vi phạm (như chứng khoán, chính trị, xúc phạm...), hãy trả lời chính xác:
    "{OUT_OF_SCOPE_MESSAGE}"
-   - Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụng kiến thức bên ngoài tài liệu.
 
 [NGỮ CẢNH TÀI LIỆU]:
 {context_str}
@@ -767,7 +857,7 @@ CÂU TRẢ LỜI:"""
         temperature: float = 0.2,
         session_id: str = "default"
     ) -> Tuple[str, List[Dict[str, Any]], float]:
-        """Synchronous batch query returning (answer, sources, latency)."""
+        """Synchronous batch query returning (answer, sources, latency) with robust multi-key rotation and model fallback."""
         start_time = time.time()
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
 
@@ -785,11 +875,14 @@ CÂU TRẢ LỜI:"""
             gen_models = candidates
 
         answer = ""
-        key_pool = self.key_manager.get_key_pool()
+        for model_idx, m_name in enumerate(gen_models):
+            key_pool = self.key_manager.get_key_pool()
+            if not key_pool:
+                print("[GEMINI ERROR] Không có Gemini API key nào khả dụng.")
+                break
 
-        for client, key, key_idx in key_pool:
-            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
-            for m_name in gen_models:
+            for client, key, key_idx in key_pool:
+                masked_key = self.key_manager.mask_key(key)
                 try:
                     response = client.models.generate_content(
                         model=m_name,
@@ -802,16 +895,23 @@ CÂU TRẢ LỜI:"""
                         break
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
+                    print(f"[GEMINI ERROR] Key #{key_idx+1} ({masked_key}) | Model: '{m_name}' | Status: {code_int} ({label}) | Chi tiết: {e}")
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded. Rotating key...")
-                        break
+                        print(f"[GEMINI ROTATE] Gặp lỗi 429 Quota/RateLimit trên Key #{key_idx+1}. Chờ 0.5s và tự động chuyển sang Key tiếp theo...")
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden. Rotating key...")
-                        break
+                        print(f"[GEMINI ROTATE] Key #{key_idx+1} bị lỗi xác thực/quyền ({label}). Chuyển sang Key tiếp theo...")
                     else:
-                        continue
+                        print(f"[GEMINI RETRY] Lỗi gọi Gemini API ({label}). Thử key tiếp theo...")
+                    time.sleep(0.5)
+                    continue
+
             if answer and not answer.startswith("Lỗi trong quá trình"):
                 break
+            else:
+                next_model = gen_models[model_idx + 1] if model_idx + 1 < len(gen_models) else None
+                if next_model:
+                    print(f"[GEMINI FALLBACK] Tất cả {len(key_pool)} keys đều bị nghẽn quota hoặc lỗi với model '{m_name}'. Tự động fallback sang model '{next_model}'...")
+                    time.sleep(0.5)
 
         if not answer:
             answer = FRIENDLY_OVERLOAD_MESSAGE
@@ -830,7 +930,7 @@ CÂU TRẢ LỜI:"""
         temperature: float = 0.2,
         session_id: str = "default"
     ) -> Generator[Dict[str, Any], None, None]:
-        """Streaming generator yielding token events for SSE and real-time UI."""
+        """Streaming generator yielding token events for SSE and real-time UI with robust multi-key rotation and model fallback."""
         start_time = time.time()
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
@@ -862,11 +962,16 @@ CÂU TRẢ LỜI:"""
             gen_models = candidates
 
         stream_success = False
-        key_pool = self.key_manager.get_key_pool()
 
-        for client, key, key_idx in key_pool:
-            masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
-            for m_name in gen_models:
+        for model_idx, m_name in enumerate(gen_models):
+            key_pool = self.key_manager.get_key_pool()
+            if not key_pool:
+                print("[GEMINI ERROR] Không có Gemini API key nào khả dụng.")
+                break
+
+            for client, key, key_idx in key_pool:
+                masked_key = self.key_manager.mask_key(key)
+                partial_stream_text = ""
                 try:
                     response_stream = client.models.generate_content_stream(
                         model=m_name,
@@ -876,25 +981,34 @@ CÂU TRẢ LỜI:"""
 
                     for chunk in response_stream:
                         if chunk.text:
-                            full_answer += chunk.text
+                            partial_stream_text += chunk.text
                             yield {"type": "token", "token": chunk.text}
-                    stream_success = True
-                    self._active_gen_model = m_name
-                    break
+
+                    if partial_stream_text.strip():
+                        full_answer = partial_stream_text
+                        stream_success = True
+                        self._active_gen_model = m_name
+                        break
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
+                    print(f"[GEMINI ERROR] Key #{key_idx+1} ({masked_key}) | Model: '{m_name}' | Status: {code_int} ({label}) | Chi tiết: {e}")
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during stream. Rotating key...")
-                        full_answer = ""
-                        break
+                        print(f"[GEMINI ROTATE] Gặp lỗi 429 Quota/RateLimit trên Key #{key_idx+1}. Chờ 0.5s và tự động chuyển sang Key tiếp theo...")
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden during stream. Rotating key...")
-                        full_answer = ""
-                        break
+                        print(f"[GEMINI ROTATE] Key #{key_idx+1} bị lỗi xác thực/quyền ({label}). Chuyển sang Key tiếp theo...")
                     else:
-                        continue
+                        print(f"[GEMINI RETRY] Lỗi khi gọi stream ({label}). Thử key tiếp theo...")
+
+                    time.sleep(0.5)
+                    continue
+
             if stream_success:
                 break
+            else:
+                next_model = gen_models[model_idx + 1] if model_idx + 1 < len(gen_models) else None
+                if next_model:
+                    print(f"[GEMINI FALLBACK] Tất cả {len(key_pool)} keys đều bị nghẽn quota hoặc lỗi với model '{m_name}'. Tự động fallback sang model '{next_model}'...")
+                    time.sleep(0.5)
 
         if not stream_success:
             full_answer = FRIENDLY_OVERLOAD_MESSAGE

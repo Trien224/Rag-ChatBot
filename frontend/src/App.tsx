@@ -261,7 +261,7 @@ export const App: React.FC = () => {
 
       if (h.status === 'fulfilled') setHealth(h.value);
       if (s.status === 'fulfilled') setStats(s.value);
-      if (docs.status === 'fulfilled' && docs.value && docs.value.length > 0) {
+      if (docs.status === 'fulfilled' && Array.isArray(docs.value)) {
         const formatted = docs.value.map((d) => ({
           ...d,
           status: 'indexed' as const,
@@ -387,31 +387,24 @@ export const App: React.FC = () => {
       filename: file.name,
       file_size: file.size,
       file_type: file.name.split('.').pop()?.toLowerCase() || 'txt',
-      chunk_count: Math.max(12, Math.floor(file.size / 15000)),
+      chunk_count: Math.max(1, Math.floor(file.size / 800)),
       created_at: new Date().toISOString(),
       status: 'processing',
       summary: `Tài liệu vừa nạp: ${file.name}`,
     }));
 
-    setDocuments((prev) => [...newDocItems, ...prev]);
+    setDocuments((prev) => [...newDocItems, ...prev.filter((d) => !files.some((f) => f.name === d.filename))]);
 
     try {
       await uploadDocuments(files, (percent) => {
         setUploadProgress(percent);
       });
-      setDocuments((prev) =>
-        prev.map((d) => (newDocItems.some((n) => n.id === d.id) ? { ...d, status: 'indexed' } : d))
-      );
       addToast('success', `Đã nạp thành công ${files.length} tài liệu vào ChromaDB!`);
+      // Refetch stats and documents to update state immediately
       await loadSystemData();
-    } catch {
-      // Offline fallback: simulate vector indexing
-      setTimeout(() => {
-        setDocuments((prev) =>
-          prev.map((d) => (newDocItems.some((n) => n.id === d.id) ? { ...d, status: 'indexed' } : d))
-        );
-        addToast('success', `Đã phân tích & nhúng ${files.length} tài liệu vào kho tri thức!`);
-      }, 1500);
+    } catch (err: any) {
+      addToast('error', err?.message || 'Lỗi khi tải tài liệu lên.');
+      await loadSystemData();
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
