@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
+
 # pyrefly: ignore [missing-import]
 import streamlit as st
-from rag_engine import RAGEngine
+
 import database
+from rag_engine import RAGEngine
 
 # Cấu hình trang giao diện
 st.set_page_config(

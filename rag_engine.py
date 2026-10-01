@@ -1,15 +1,21 @@
+import json
 import os
+import re
 import sys
-import time
 import threading
-from typing import List, Dict, Any, Tuple, Generator, Optional
-import pypdf
+import time
+from typing import Any, Dict, Generator, List, Optional, Tuple
+
 import chromadb
-from google import genai
-from google.genai import types
 import cohere
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+import pypdf
 
+import data as database
+
+# UTF-8 stdout/stderr reconfiguration for Windows terminals
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -21,48 +27,69 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-# Database storage
-import data as database
-
 load_dotenv()
 
-
+# System Messages & Guardrails
 FRIENDLY_OVERLOAD_MESSAGE = (
     "Xin lỗi cậu nha, hiện tại hệ thống AI đang bị quá tải lượt truy vấn trong giây lát. "
     "Cậu vui lòng đợi khoảng 1-2 phút rồi thử gửi lại câu hỏi giúp tớ nhé!"
 )
 
+NO_INFO_FALLBACK_MESSAGE = (
+    "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. "
+    "Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
+)
+
+OUT_OF_SCOPE_MESSAGE = (
+    "Xin lỗi cậu nhé, tớ chỉ có thể hỗ trợ các thông tin liên quan đến học vụ và quy chế của NTU thôi nè."
+)
+
+DEFAULT_EMBED_MODELS = [
+    "text-embedding-004",
+    "gemini-embedding-001",
+    "models/text-embedding-004",
+    "gemini-embedding-2"
+]
+
+DEFAULT_GEN_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite"
+]
+
 
 def is_quota_or_rate_limit_error(e: Exception) -> bool:
-    """Helper to detect 429 Quota Exceeded / Resource Exhausted errors from Gemini API."""
-    err_msg = str(e).lower()
-    err_type = type(e).__name__.lower()
-    
+    """Detects 429 Quota Exceeded / Rate Limit / Resource Exhausted errors from Gemini API."""
     if hasattr(e, "code") and getattr(e, "code") == 429:
         return True
     if hasattr(e, "status_code") and getattr(e, "status_code") == 429:
         return True
     if hasattr(e, "status") and "RESOURCE_EXHAUSTED" in str(getattr(e, "status", "")):
         return True
-        
+
+    err_msg = str(e).lower()
+    err_type = type(e).__name__.lower()
     keywords = ["429", "resource_exhausted", "resourceexhausted", "quota", "rate limit", "too many requests", "exhausted"]
     return any(kw in err_msg or kw in err_type for kw in keywords)
 
 
 def get_gemini_error_info(e: Exception) -> Tuple[int, str]:
-    """
-    Phân tích chi tiết mã lỗi (429, 400, 403, 500,...) và tên lỗi từ Gemini API để ghi log rõ ràng.
-    """
+    """Parses status codes and readable error labels from Gemini API exceptions."""
     code = getattr(e, "code", None) or getattr(e, "status_code", None)
     err_str = str(e).lower()
     err_type = type(e).__name__
-    
+
     if code is None:
         if is_quota_or_rate_limit_error(e):
             code = 429
-        elif "invalid" in err_str or "api_key" in err_str or "api key not valid" in err_str or "api_key_invalid" in err_str:
+        elif any(k in err_str for k in ["invalid", "api_key", "api key not valid", "api_key_invalid"]):
             code = 400
-        elif "permission_denied" in err_str or "forbidden" in err_str:
+        elif any(k in err_str for k in ["permission_denied", "forbidden"]):
             code = 403
         elif "not_found" in err_str:
             code = 404
@@ -70,7 +97,7 @@ def get_gemini_error_info(e: Exception) -> Tuple[int, str]:
             code = 503
         else:
             code = 500
-    
+
     try:
         code_int = int(code)
     except Exception:
@@ -95,10 +122,7 @@ def get_gemini_error_info(e: Exception) -> Tuple[int, str]:
 class GeminiKeyManager:
     """
     Thread-safe Round-Robin Key Manager and Cycler for Google Gemini API Keys.
-    Handles:
-    - Comma-separated GEMINI_KEYS parsing and validation (loại bỏ khoảng trắng thừa)
-    - Round-robin key rotation across incoming requests
-    - Automatic fallback and retries upon encountering 429 (Resource Exhausted / Quota Exceeded)
+    Handles key parsing, validation, client instantiation, and request rotation.
     """
     def __init__(self, raw_keys_str: Optional[str] = None):
         self.lock = threading.Lock()
@@ -107,20 +131,19 @@ class GeminiKeyManager:
         self._counter: int = 0
         self.load_keys(raw_keys_str)
 
-    def load_keys(self, raw_keys_str: Optional[str] = None):
+    def load_keys(self, raw_keys_str: Optional[str] = None) -> None:
         if raw_keys_str is None:
             raw_keys_str = os.getenv("GEMINI_KEYS", "") or os.getenv("GEMINI_API_KEY", "")
-        
+
         parsed_keys: List[str] = []
-        # Phân tách danh sách key qua dấu phẩy, chấm phẩy hoặc xuống dòng (hỗ trợ Render/Docker env)
-        import re
         raw_clean = str(raw_keys_str).strip().strip("[]").strip("()").strip("{}")
         chunks = re.split(r'[,;\n\r]+', raw_clean)
+        
         for k in chunks:
             cleaned = k.strip().strip('"').strip("'").strip('`').strip()
             if cleaned and cleaned not in parsed_keys:
                 parsed_keys.append(cleaned)
-                
+
         self.keys = parsed_keys
         self.clients = []
         for idx, k in enumerate(self.keys, 1):
@@ -139,33 +162,27 @@ class GeminiKeyManager:
         return len(self.keys)
 
     def get_key_pool(self) -> List[Tuple[genai.Client, str, int]]:
-        """
-        Returns a round-robin ordered list of (client, key, idx) starting from the next rotated index,
-        allowing a request to attempt all keys in cyclical order.
-        """
+        """Returns a round-robin ordered list of (client, key, idx) starting from next rotated index."""
         if not self.keys or not self.clients:
             return []
-            
+
         with self.lock:
             start_idx = self._counter % len(self.keys)
             self._counter += 1
 
-        pool = []
         n = len(self.keys)
-        for i in range(n):
-            idx = (start_idx + i) % n
-            pool.append((self.clients[idx], self.keys[idx], idx))
-        return pool
+        return [(self.clients[(start_idx + i) % n], self.keys[(start_idx + i) % n], (start_idx + i) % n) for i in range(n)]
 
 
+# Recursive Character Text Splitter (LangChain with self-contained fallback)
 try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
 except ImportError:
     try:
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
     except ImportError:
-        class RecursiveCharacterTextSplitter:
-            """Fallback RecursiveCharacterTextSplitter implementation."""
+        class RecursiveCharacterTextSplitter:  # type: ignore
+            """Pure Python fallback for RecursiveCharacterTextSplitter."""
             def __init__(self, chunk_size: int = 800, chunk_overlap: int = 150, separators: Optional[List[str]] = None):
                 self.chunk_size = chunk_size
                 self.chunk_overlap = chunk_overlap
@@ -190,17 +207,20 @@ except ImportError:
                             break
                         start += max(1, self.chunk_size - self.chunk_overlap)
                     return chunks
+
                 sep = separators[0]
                 remaining = separators[1:]
                 splits = list(text) if sep == "" else text.split(sep)
                 good_splits, current_chunk, current_len = [], [], 0
+
                 for s in splits:
                     item = s if sep == "" else (s + sep)
                     item_len = len(item)
                     if item_len > self.chunk_size:
                         if current_chunk:
                             m = "".join(current_chunk).strip()
-                            if m: good_splits.append(m)
+                            if m:
+                                good_splits.append(m)
                             current_chunk, current_len = [], 0
                         good_splits.extend(self._split(item, remaining))
                     elif current_len + item_len <= self.chunk_size:
@@ -208,7 +228,8 @@ except ImportError:
                         current_len += item_len
                     else:
                         m = "".join(current_chunk).strip()
-                        if m: good_splits.append(m)
+                        if m:
+                            good_splits.append(m)
                         overlap_items, overlap_len = [], 0
                         for prev in reversed(current_chunk):
                             if overlap_len + len(prev) <= self.chunk_overlap:
@@ -218,29 +239,28 @@ except ImportError:
                                 break
                         current_chunk = overlap_items + [item]
                         current_len = sum(len(x) for x in current_chunk)
+
                 if current_chunk:
                     m = "".join(current_chunk).strip()
-                    if m: good_splits.append(m)
+                    if m:
+                        good_splits.append(m)
                 return [c for c in good_splits if c.strip()]
-
-
-RecursiveTextSplitter = RecursiveCharacterTextSplitter
 
 
 class RAGEngine:
     """
     Production-Grade RAG Engine supporting:
     - Multi-format document ingestion (.pdf, .docx, .txt, .md)
-    - LangChain RecursiveCharacterTextSplitter (chunk_size=800, chunk_overlap=150)
-    - ChromaDB Vector Store with Cosine similarity (HNSW index)
-    - Google Text-Embedding (text-embedding-004) & Gemini 2.5 Flash Generation
-    - SQLite Relational Database (system_data.db: users, documents, document_chunks, chat_logs)
-    - Cohere Reranking & Strict Hallucination Guardrails
-    - Streaming (SSE) & JSON query responses
+    - Recursive Character text splitting
+    - ChromaDB Vector Store with Cosine distance
+    - Google Embedding & Gemini generation with round-robin key management and rate limit fallbacks
+    - SQLite database for documents, chunks, suggested questions, and chat history
+    - Cohere Reranking with graceful fallback to cosine similarity
+    - Streaming (SSE) and JSON responses
     """
     def __init__(self, chroma_path: str = "chroma_db", collection_name: str = "production_rag_docs"):
         database.init_db()
-        
+
         self.chroma_path = chroma_path
         self.collection_name = collection_name
         self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
@@ -248,41 +268,35 @@ class RAGEngine:
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"}
         )
-        
-        # Configure Gemini API keys (supports Round-Robin & 429 Fallback)
+
+        # Gemini Multi-Key Manager
         self.key_manager = GeminiKeyManager()
         self.gemini_keys = self.key_manager.keys
-        self.current_key_idx = 0
         self._active_embed_model: Optional[str] = None
         self._active_gen_model: Optional[str] = None
 
-        # Configure Cohere Reranker
+        # Cohere Reranker
         self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
         self.cohere_client = cohere.Client(api_key=self.cohere_key) if self.cohere_key else None
 
     @property
-    def gemini_client(self):
-        """Backward-compatible access to a client."""
-        if self.key_manager.clients:
-            return self.key_manager.clients[0]
-        return None
+    def gemini_client(self) -> Optional[genai.Client]:
+        """Provides backward-compatible access to primary client."""
+        return self.key_manager.clients[0] if self.key_manager.clients else None
 
     def get_embedding(self, text: str) -> List[float]:
-        """
-        Tạo embedding vector cho đoạn văn bản sử dụng mô hình Google Text-Embedding (text-embedding-004)
-        với cơ chế xoay vòng Key và Fallback tự động.
-        """
+        """Generates embedding vector with automatic key rotation and model fallback."""
         if not self.key_manager.total_keys:
-            raise ValueError("GEMINI_API_KEY / GEMINI_KEYS chưa được cấu hình trong .env")
-        
-        candidates = ["text-embedding-004", "gemini-embedding-001", "gemini-embedding-2"]
+            raise ValueError("GEMINI_API_KEY hoặc GEMINI_KEYS chưa được cấu hình trong .env")
+
+        candidates = DEFAULT_EMBED_MODELS
         if self._active_embed_model and self._active_embed_model in candidates:
             embed_models = [self._active_embed_model] + [m for m in candidates if m != self._active_embed_model]
         else:
             embed_models = candidates
 
         key_pool = self.key_manager.get_key_pool()
-        last_err = None
+        last_err: Optional[Exception] = None
 
         for client, key, key_idx in key_pool:
             masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
@@ -298,10 +312,10 @@ class RAGEngine:
                     last_err = e
                     code_int, label = get_gemini_error_info(e)
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Quota exceeded on embedding. Rotating to next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Quota exceeded on embedding. Rotating key...")
                         break
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Key invalid/forbidden ({e}). Rotating to next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': Key invalid/forbidden. Rotating key...")
                         break
                     else:
                         print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{model_name}': {e}")
@@ -312,18 +326,14 @@ class RAGEngine:
         raise ValueError("Không thể tạo embedding từ tất cả các API keys.")
 
     def extract_text_from_file(self, file_path: str, original_filename: str) -> List[Dict[str, Any]]:
-        """
-        Trích xuất nội dung từ các định dạng file (.pdf, .docx, .txt, .md).
-        Trả về danh sách các trang/phần chứa text và metadata.
-        """
+        """Extracts text content and pages from (.pdf, .docx, .doc, .txt, .md)."""
         ext = os.path.splitext(original_filename)[1].lower()
-        pages_content = []
+        pages_content: List[Dict[str, Any]] = []
 
         if ext == ".pdf":
             reader = pypdf.PdfReader(file_path)
             for page_idx, page in enumerate(reader.pages):
-                text = page.extract_text() or ""
-                text = text.strip()
+                text = (page.extract_text() or "").strip()
                 if text:
                     pages_content.append({
                         "page_number": page_idx + 1,
@@ -331,7 +341,7 @@ class RAGEngine:
                         "file_type": "pdf"
                     })
         elif ext in [".docx", ".doc"]:
-            # Word document
+            full_text = ""
             try:
                 import docx2txt
                 full_text = docx2txt.process(file_path) or ""
@@ -342,7 +352,7 @@ class RAGEngine:
                     full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
                 except Exception as ex:
                     full_text = f"Error extracting DOCX: {ex}"
-            
+
             if full_text.strip():
                 pages_content.append({
                     "page_number": 1,
@@ -350,14 +360,14 @@ class RAGEngine:
                     "file_type": "docx"
                 })
         else:
-            # Plain text / Markdown (.txt, .md, etc.)
+            full_text = ""
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     full_text = f.read()
             except Exception:
                 with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
                     full_text = f.read()
-            
+
             if full_text.strip():
                 pages_content.append({
                     "page_number": 1,
@@ -367,16 +377,19 @@ class RAGEngine:
 
         return pages_content
 
-    def ingest_file(self, file_path: str, original_filename: Optional[str] = None,
-                    chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False) -> Dict[str, Any]:
-        """
-        Nạp tài liệu, chia đoạn theo RecursiveCharacterTextSplitter, tạo embeddings và lưu vào ChromaDB + SQLite.
-        Tự động kiểm tra trùng lặp: nếu tài liệu đã tồn tại trong CẢ SQLite và ChromaDB thì bỏ qua để tối ưu hiệu năng.
-        """
+    def ingest_file(
+        self,
+        file_path: str,
+        original_filename: Optional[str] = None,
+        chunk_size: int = 800,
+        chunk_overlap: int = 150,
+        force_reload: bool = False
+    ) -> Dict[str, Any]:
+        """Splits, embeds, and stores documents in ChromaDB and SQLite."""
         if original_filename is None:
             original_filename = os.path.basename(file_path)
 
-        # 0. Kiểm tra trùng lặp nếu không yêu cầu nạp đè (force_reload=False)
+        # 0. Check for existing indexed document
         if not force_reload:
             try:
                 with database.get_connection() as conn:
@@ -387,7 +400,6 @@ class RAGEngine:
                         cursor.execute("SELECT COUNT(*) as cnt FROM document_chunks WHERE doc_id = ?", (existing_doc["doc_id"],))
                         chunk_cnt = cursor.fetchone()["cnt"]
                         if chunk_cnt > 0:
-                            # Xác thực rằng ChromaDB thực sự đang chứa vectors của file này
                             chroma_items = self.collection.get(where={"source": original_filename}, limit=1)
                             if chroma_items and chroma_items.get("ids") and len(chroma_items["ids"]) > 0:
                                 existing_faqs = database.get_suggested_questions_by_doc(existing_doc["doc_id"])
@@ -398,24 +410,22 @@ class RAGEngine:
                                     "chunks_count": chunk_cnt,
                                     "pages_count": existing_doc["total_pages"],
                                     "status": "already_indexed",
-                                    "message": f"Tài liệu '{original_filename}' đã được đánh chỉ mục ({chunk_cnt} chunks) trong cả SQLite và ChromaDB."
+                                    "message": f"Tài liệu '{original_filename}' đã được đánh chỉ mục ({chunk_cnt} chunks)."
                                 }
-                            else:
-                                print(f"[INGEST] Tài liệu '{original_filename}' có trong SQLite nhưng thiếu vector trong ChromaDB. Đang tiến hành nạp lại...")
             except Exception as e:
-                print(f"[INGEST] Lưu ý khi kiểm tra trùng lặp cho '{original_filename}': {e}")
+                print(f"[INGEST] Kiểm tra trùng lặp cho '{original_filename}': {e}")
 
         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
         pages_data = self.extract_text_from_file(file_path, original_filename)
-        
+
         if not pages_data:
-            print(f"[INGEST CẢNH BÁO] Không thể trích xuất văn bản từ '{original_filename}' (file rỗng hoặc không đọc được).")
+            print(f"[INGEST CẢNH BÁO] Không thể trích xuất văn bản từ '{original_filename}'.")
             return {"filename": original_filename, "chunks_count": 0, "status": "empty_file"}
 
         ext = os.path.splitext(original_filename)[1].lower().replace(".", "") or "txt"
         total_pages = max(len(pages_data), 1)
 
-        # 1. Lưu bản ghi document vào SQLite
+        # 1. Save document to SQLite
         doc_id = database.save_document_record(
             filename=original_filename,
             file_path=file_path,
@@ -425,13 +435,12 @@ class RAGEngine:
         )
         database.clear_chunks_for_document(doc_id)
 
-        # 2. Chia chunk thông minh
+        # 2. Text splitting & embeddings
         splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        
-        all_chunks = []
-        all_ids = []
-        all_metas = []
-        all_embeddings = []
+        all_chunks: List[str] = []
+        all_ids: List[str] = []
+        all_metas: List[Dict[str, Any]] = []
+        all_embeddings: List[List[float]] = []
 
         chunk_idx = 0
         for p in pages_data:
@@ -450,7 +459,7 @@ class RAGEngine:
                 all_ids.append(vector_id)
                 all_embeddings.append(embedding)
                 all_chunks.append(clean_chunk)
-                
+
                 meta = {
                     "source": original_filename,
                     "page": page_num,
@@ -460,7 +469,6 @@ class RAGEngine:
                 }
                 all_metas.append(meta)
 
-                # Lưu chunk vào SQLite
                 database.save_chunk_record(
                     doc_id=doc_id,
                     chunk_index=chunk_idx,
@@ -470,15 +478,13 @@ class RAGEngine:
                 )
                 chunk_idx += 1
 
-        # 3. Batch Upsert vào ChromaDB
+        # 3. Batch Upsert into ChromaDB
         if all_ids:
-            # Delete old chunks for this document from Chroma if any
             try:
                 self.collection.delete(where={"source": original_filename})
             except Exception:
                 pass
 
-            # Insert in batches of 100
             batch_size = 100
             for i in range(0, len(all_ids), batch_size):
                 end_i = i + batch_size
@@ -490,8 +496,8 @@ class RAGEngine:
                 )
             print(f"[INGEST CHROMA] Đã lưu {len(all_ids)} vectors của '{original_filename}' vào ChromaDB.")
 
-        # 4. Tự động sinh câu hỏi thường gặp FAQs cho tài liệu
-        generated_faqs = []
+        # 4. Generate suggested FAQs
+        generated_faqs: List[str] = []
         try:
             generated_faqs = self.generate_faqs_for_pdf(file_path, doc_id)
         except Exception as ex:
@@ -506,10 +512,7 @@ class RAGEngine:
         }
 
     def generate_faqs_for_pdf(self, file_path: str, doc_id: int) -> List[str]:
-        """
-        Tự động phân tích nội dung tài liệu và sinh danh sách 5-7 câu hỏi thường gặp (FAQs) quan trọng.
-        Lưu kết quả vào bảng suggested_questions trong SQLite.
-        """
+        """Generates 5-7 frequent questions (FAQs) from document content and saves to SQLite."""
         try:
             pages_data = self.extract_text_from_file(file_path, os.path.basename(file_path))
         except Exception:
@@ -518,7 +521,6 @@ class RAGEngine:
         if not pages_data:
             return []
 
-        # Trích xuất khoảng 3500 ký tự đầu của tài liệu để nắm nội dung trọng tâm
         sample_text = ""
         for p in pages_data[:5]:
             sample_text += f"\n--- Trang {p.get('page_number', 1)} ---\n" + p.get("text", "")
@@ -544,33 +546,28 @@ Trả về DUY NHẤT một JSON Array các chuỗi câu hỏi (list of strings)
 Ví dụ:
 [
   "Điều kiện để được xét học bổng khuyến khích học tập là gì?",
-  "Sinh viên cần tích lũy tối thiểu bao nhiêu tín chỉ để đi thực tập?",
-  "Thời gian và quy trình nộp đồ án tốt nghiệp như thế nào?"
+  "Sinh viên cần tích lũy tối thiểu bao nhiêu tín chỉ để đi thực tập?"
 ]
 Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào ngoài chuỗi JSON hợp lệ."""
 
-        gen_models = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
         faqs: List[str] = []
         key_pool = self.key_manager.get_key_pool()
 
         for client, key, key_idx in key_pool:
             masked_key = f"...{key[-6:]}" if len(key) >= 6 else "***"
-            for m_name in gen_models:
+            for m_name in DEFAULT_GEN_MODELS:
                 try:
                     res = client.models.generate_content(
                         model=m_name,
                         contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=0.2
-                        )
+                        config=types.GenerateContentConfig(temperature=0.2)
                     )
                     raw_text = res.text.strip()
                     if "```json" in raw_text:
                         raw_text = raw_text.split("```json")[1].split("```")[0].strip()
                     elif "```" in raw_text:
                         raw_text = raw_text.split("```")[1].split("```")[0].strip()
-                    
-                    import json
+
                     parsed = json.loads(raw_text)
                     if isinstance(parsed, list):
                         faqs = [str(q).strip() for q in parsed if str(q).strip()]
@@ -578,13 +575,12 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during FAQ generation. Retrying with next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during FAQ generation. Rotating key...")
                         break
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden ({e}). Retrying with next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden. Rotating key...")
                         break
                     else:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': {e}")
                         continue
             if faqs:
                 break
@@ -596,18 +592,21 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         return faqs
 
     def ingest_pdf(self, file_path: str, original_filename: Optional[str] = None) -> Dict[str, Any]:
-        """Wrapper nạp tài liệu PDF và tự động tạo FAQs."""
+        """Convenience wrapper for PDF ingestion."""
         return self.ingest_file(file_path, original_filename)
 
-    def ingest_docs_folder(self, folder_path: str = "docs", chunk_size: int = 800, chunk_overlap: int = 150, force_reload: bool = False) -> List[Dict[str, Any]]:
-        """
-        Quét và nạp toàn bộ tài liệu có trong thư mục.
-        Log chi tiết từng file nạp thành công hay thất bại.
-        """
+    def ingest_docs_folder(
+        self,
+        folder_path: str = "docs",
+        chunk_size: int = 800,
+        chunk_overlap: int = 150,
+        force_reload: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Scans and ingests all supported documents in folder."""
         if not os.path.exists(folder_path):
             print(f"[INGEST FOLDER] Thư mục '{folder_path}' không tồn tại.")
             return []
-        
+
         results = []
         files = [
             f for f in os.listdir(folder_path)
@@ -640,16 +639,16 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         return results
 
     def delete_document(self, filename: str) -> bool:
-        """Xóa tài liệu khỏi ChromaDB và SQLite."""
+        """Deletes document vectors from ChromaDB and metadata from SQLite."""
         try:
             self.collection.delete(where={"source": filename})
         except Exception as e:
             print(f"Lỗi khi xóa vector từ Chroma: {e}")
-        
+
         return database.delete_document_record(filename)
 
     def clear_all(self) -> bool:
-        """Xóa toàn bộ dữ liệu vector và SQLite."""
+        """Wipes all vectors from ChromaDB and document records from SQLite."""
         try:
             self.chroma_client.delete_collection(self.collection_name)
         except Exception:
@@ -663,11 +662,7 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
 
     def retrieve(self, query_text: str, top_k: int = 4, use_rerank: bool = True) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
-        Semantic Retrieval tối ưu:
-        1. Kiểm tra số lượng vectors trong collection.
-        2. Embeds query -> query ChromaDB với fetch_k (min 4, max top_k*2).
-        3. Reranks candidates sử dụng Cohere Rerank lấy Top-K đoạn có độ liên quan cao nhất.
-        4. Trả về danh sách docs và metadata tương ứng cùng logging chi tiết.
+        Retrieves top relevant chunks from ChromaDB with optional Cohere Reranking.
         """
         total_vectors = 0
         try:
@@ -678,13 +673,12 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         print(f"\n[RAG RETRIEVE] Truy vấn: '{query_text}' | Tổng số vectors trong ChromaDB: {total_vectors}")
 
         if total_vectors == 0:
-            print(f"[RAG RETRIEVE CẢNH BÁO] ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Không thể tìm kiếm tài liệu!")
+            print(f"[RAG RETRIEVE CẢNH BÁO] ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors).")
             return [], []
 
         q_embed = self.get_embedding(query_text)
-        
-        # Lấy fetch_k candidates từ ChromaDB
         fetch_k = min(max(top_k * 2, 4), total_vectors)
+
         try:
             search_results = self.collection.query(
                 query_embeddings=[q_embed],
@@ -693,16 +687,14 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
         except Exception as e:
             print(f"[RAG RETRIEVE ERROR] Lỗi khi truy vấn ChromaDB: {e}")
             return [], []
-        
+
         docs = search_results["documents"][0] if (search_results and search_results.get("documents")) else []
         metas = search_results["metadatas"][0] if (search_results and search_results.get("metadatas")) else []
-        distances = search_results["distances"][0] if (search_results and "distances" in search_results and search_results["distances"]) else []
+        distances = search_results["distances"][0] if (search_results and search_results.get("distances")) else []
 
         if not docs:
-            print(f"[RAG RETRIEVE KẾT QUẢ RỖNG] ChromaDB không trả về chunk nào khớp. (Tổng vectors trong DB: {total_vectors})")
             return [], []
 
-        # Gán similarity/distance vào metadata
         for idx, m in enumerate(metas):
             if idx < len(distances):
                 dist = float(distances[idx])
@@ -710,15 +702,10 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                 m["similarity"] = round(max(0.0, 1.0 - dist), 4)
             m["content_snippet"] = docs[idx][:200] + ("..." if len(docs[idx]) > 200 else "")
 
-        print(f"[RAG RETRIEVE] Tìm thấy {len(docs)} chunks từ ChromaDB:")
-        for idx, m in enumerate(metas):
-            print(f"  - Chunk #{idx+1}: source={m.get('source')} (trang {m.get('page', 'N/A')}) | distance={m.get('distance')} | similarity={m.get('similarity')}")
-
-        # Rerank với Cohere (lấy Top-K có độ liên quan cao nhất)
+        # Rerank with Cohere if available
         if use_rerank and self.cohere_client and len(docs) > 1:
             try:
                 target_top_n = min(top_k, len(docs))
-                print(f"[RAG RERANK] Đang rerank {len(docs)} chunks với Cohere Rerank v3.5 (lấy Top-{target_top_n})...")
                 rerank_resp = self.cohere_client.rerank(
                     model="rerank-v3.5",
                     query=query_text,
@@ -733,33 +720,18 @@ Không viết thêm bất kỳ lời dẫn hay định dạng giải thích nào
                     m["relevance_score"] = round(float(item.relevance_score), 4)
                     ranked_docs.append(docs[i])
                     ranked_metas.append(m)
-
-                print(f"[RAG RERANK] Kết quả sau khi Rerank ({len(ranked_docs)} chunks):")
-                for idx, m in enumerate(ranked_metas):
-                    print(f"  - Rerank #{idx+1}: source={m.get('source')} (trang {m.get('page', 'N/A')}) | relevance_score={m.get('relevance_score')} | similarity={m.get('similarity')}")
-
                 return ranked_docs, ranked_metas
             except Exception as e:
-                print(f"[RAG RERANK WARNING] Cohere rerank gặp lỗi, fallback về Cosine similarity: {e}")
+                print(f"[RAG RERANK WARNING] Cohere rerank lỗi, fallback về Cosine similarity: {e}")
 
-        # Mặc định lấy top_k từ vector search
-        selected_docs = docs[:top_k]
-        selected_metas = metas[:top_k]
-        print(f"[RAG RETRIEVE] Sử dụng Top-{len(selected_docs)} chunks từ Cosine similarity.")
-        return selected_docs, selected_metas
+        return docs[:top_k], metas[:top_k]
 
     def build_prompt(self, question: str, retrieved_docs: List[str]) -> str:
-        """
-        Khởi tạo Prompt với System Guardrail và phong cách giao tiếp thân thiện (tớ - cậu).
-        Phòng ngừa hiện tượng ảo giác (hallucination) 100%.
-        """
-        context_blocks = []
-        for i, doc in enumerate(retrieved_docs, 1):
-            context_blocks.append(f"[ĐOẠN TRÍCH {i}]\n{doc}")
-        
+        """Constructs prompt with guardrails and conversational style."""
+        context_blocks = [f"[ĐOẠN TRÍCH {i}]\n{doc}" for i, doc in enumerate(retrieved_docs, 1)]
         context_str = "\n\n".join(context_blocks)
 
-        prompt = f"""Bạn là NTU EduBot - một người bạn đại học đồng hành thông minh, thân thiện và nhiệt tình của các bạn sinh viên Đại học Nha Trang (NTU).
+        return f"""Bạn là NTU EduBot - một người bạn đại học đồng hành thông minh, thân thiện và nhiệt tình của các bạn sinh viên Đại học Nha Trang (NTU).
 Nhiệm vụ của bạn là giải đáp thắc mắc của sinh viên về quy chế học vụ, điểm số, học phí, học bổng, thực tập, đồ án tốt nghiệp và nội quy nhà trường DỰA TUYỆT ĐỐI VÀO [NGỮ CẢNH TÀI LIỆU] được cung cấp dưới đây.
 
 CÁC NGUYÊN TẮC GIAO TIẾP VÀ RÀNG BUỘC BẮT BUỘC:
@@ -774,9 +746,9 @@ CÁC NGUYÊN TẮC GIAO TIẾP VÀ RÀNG BUỘC BẮT BUỘC:
 
 3. QUY TẮC BẢO VỆ VÀ XỬ LÝ KHI THIẾU THÔNG TIN (GUARDRAILS):
    - Khi câu hỏi không có căn cứ trong tài liệu hoặc không tìm thấy thông tin trong [NGỮ CẢNH TÀI LIỆU], hãy trả lời chính xác nguyên văn câu sau:
-   "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
+   "{NO_INFO_FALLBACK_MESSAGE}"
    - Với các câu hỏi hoàn toàn ngoài lề, nhạy cảm hoặc không được phép (như chứng khoán, giải trí ngoài lề, chính trị, xúc phạm...), hãy trả lời chính xác:
-   "Xin lỗi cậu nhé, tớ chỉ có thể hỗ trợ các thông tin liên quan đến học vụ và quy chế của NTU thôi nè."
+   "{OUT_OF_SCOPE_MESSAGE}"
    - Tuyệt đối KHÔNG tự suy đoán, bịa đặt số liệu hoặc sử dụng kiến thức bên ngoài tài liệu.
 
 [NGỮ CẢNH TÀI LIỆU]:
@@ -786,42 +758,27 @@ CÁC NGUYÊN TẮC GIAO TIẾP VÀ RÀNG BUỘC BẮT BUỘC:
 {question}
 
 CÂU TRẢ LỜI:"""
-        return prompt
 
-    def query(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Tuple[str, List[Dict[str, Any]], float]:
-        """
-        Truy vấn RAG dạng Batch JSON, trả về (câu trả lời, nguồn trích dẫn, latency).
-        Mô hình LLM: Google Gemini với temperature = 0.2.
-        """
+    def query(
+        self,
+        question: str,
+        top_k: int = 4,
+        use_rerank: bool = True,
+        temperature: float = 0.2,
+        session_id: str = "default"
+    ) -> Tuple[str, List[Dict[str, Any]], float]:
+        """Synchronous batch query returning (answer, sources, latency)."""
         start_time = time.time()
-        print(f"\n{'='*60}\n[RAG QUERY BẮT ĐẦU] Câu hỏi: '{question}' | top_k={top_k}, rerank={use_rerank}, session={session_id}")
-
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
-        
+
         if not docs:
-            total_vecs = 0
-            try:
-                total_vecs = self.collection.count()
-            except Exception:
-                pass
-
-            if total_vecs == 0:
-                reason = f"ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Chưa có tài liệu nào được nạp vào ChromaDB."
-            else:
-                reason = f"ChromaDB có {total_vecs} vectors nhưng không tìm thấy đoạn trích nào liên quan hoặc không đạt ngưỡng độ tương đồng."
-            
-            print(f"[RAG QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
-
             latency = round(time.time() - start_time, 2)
-            answer = "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
+            answer = NO_INFO_FALLBACK_MESSAGE
             database.log_chat_interaction(question, answer, sources, latency, search_type="none", session_id=session_id)
-            print(f"[RAG QUERY KẾT THÚC] Latency: {latency}s | Trả về phản hồi thân thiện.\n{'='*60}")
             return answer, [], latency
 
-        print(f"[RAG QUERY] Đang sinh câu trả lời với Gemini từ {len(docs)} đoạn trích...")
         prompt = self.build_prompt(question, docs)
-        
-        candidates = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
+        candidates = DEFAULT_GEN_MODELS
         if self._active_gen_model and self._active_gen_model in candidates:
             gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
         else:
@@ -837,9 +794,7 @@ CÂU TRẢ LỜI:"""
                     response = client.models.generate_content(
                         model=m_name,
                         contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=temperature
-                        )
+                        config=types.GenerateContentConfig(temperature=temperature)
                     )
                     if response and response.text:
                         answer = response.text
@@ -848,45 +803,39 @@ CÂU TRẢ LỜI:"""
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded. Rotating to next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded. Rotating key...")
                         break
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden ({e}). Rotating to next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden. Rotating key...")
                         break
                     else:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': {e}")
                         continue
             if answer and not answer.startswith("Lỗi trong quá trình"):
                 break
 
         if not answer:
-            print("[GEMINI QUERY ALL KEYS FAILED] Tất cả API keys đều bị quá tải hoặc lỗi. Trả về thông báo quá tải thân thiện.")
             answer = FRIENDLY_OVERLOAD_MESSAGE
 
         latency = round(time.time() - start_time, 2)
-        
-        # Log SQLite sau khi hoàn thành
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
         database.log_chat_interaction(question, answer, sources, latency, search_type=search_type, session_id=session_id)
 
-        print(f"[RAG QUERY HOÀN TẤT] Latency: {latency}s | Số nguồn trích dẫn: {len(sources)}\n{'='*60}")
         return answer, sources, latency
 
-    def query_stream(self, question: str, top_k: int = 4, use_rerank: bool = True, temperature: float = 0.2, session_id: str = "default") -> Generator[Dict[str, Any], None, None]:
-        """
-        Streaming Generator for Fast Response (Server-Sent Events & Streamlit).
-        1. Gửi metadata nguồn trích dẫn ngay lập tức.
-        2. Dùng generate_content_stream() để sinh từng token (giảm latency cảm nhận < 1s).
-        3. Ghi log SQLite sau khi đã hoàn tất toàn bộ stream ra cho người dùng để không gây nghẽn.
-        """
+    def query_stream(
+        self,
+        question: str,
+        top_k: int = 4,
+        use_rerank: bool = True,
+        temperature: float = 0.2,
+        session_id: str = "default"
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Streaming generator yielding token events for SSE and real-time UI."""
         start_time = time.time()
-        print(f"\n{'='*60}\n[RAG STREAM QUERY BẮT ĐẦU] Câu hỏi: '{question}' | top_k={top_k}, rerank={use_rerank}, session={session_id}")
-
         docs, sources = self.retrieve(question, top_k=top_k, use_rerank=use_rerank)
-        
         search_type = "cohere_rerank" if (use_rerank and self.cohere_client) else "cosine_similarity"
 
-        # Emit sources first (không chờ)
+        # Emit sources first
         yield {
             "type": "sources",
             "sources": sources,
@@ -895,33 +844,18 @@ CÂU TRẢ LỜI:"""
         }
 
         if not docs:
-            total_vecs = 0
-            try:
-                total_vecs = self.collection.count()
-            except Exception:
-                pass
-
-            if total_vecs == 0:
-                reason = f"ChromaDB collection '{self.collection_name}' đang RỖNG (0 vectors). Chưa có tài liệu nào được nạp vào ChromaDB."
-            else:
-                reason = f"ChromaDB có {total_vecs} vectors nhưng không tìm thấy đoạn trích nào phù hợp với câu hỏi."
-            
-            print(f"[RAG STREAM QUERY KHÔNG CÓ KẾT QUẢ] {reason}")
-
-            msg = "Xin lỗi cậu nha, tớ không tìm thấy thông tin này trong tài liệu học vụ hiện có của trường mình. Cậu thử kiểm tra lại từ khóa hoặc hỏi phòng đào tạo xem sao nhé!"
+            msg = NO_INFO_FALLBACK_MESSAGE
             for word in msg.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
             latency = round(time.time() - start_time, 2)
             database.log_chat_interaction(question, msg, sources, latency, search_type="none", session_id=session_id)
             yield {"type": "done", "latency": latency}
-            print(f"[RAG STREAM QUERY KẾT THÚC] Latency: {latency}s | Trả về phản hồi thân thiện.\n{'='*60}")
             return
 
-        print(f"[RAG STREAM QUERY] Đang sinh luồng phản hồi token từ Gemini với {len(docs)} đoạn trích...")
         prompt = self.build_prompt(question, docs)
         full_answer = ""
-        candidates = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
+        candidates = DEFAULT_GEN_MODELS
         if self._active_gen_model and self._active_gen_model in candidates:
             gen_models = [self._active_gen_model] + [m for m in candidates if m != self._active_gen_model]
         else:
@@ -937,9 +871,7 @@ CÂU TRẢ LỜI:"""
                     response_stream = client.models.generate_content_stream(
                         model=m_name,
                         contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=temperature
-                        )
+                        config=types.GenerateContentConfig(temperature=temperature)
                     )
 
                     for chunk in response_stream:
@@ -952,28 +884,24 @@ CÂU TRẢ LỜI:"""
                 except Exception as e:
                     code_int, label = get_gemini_error_info(e)
                     if code_int == 429 or is_quota_or_rate_limit_error(e):
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during stream. Retrying with next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Quota exceeded during stream. Rotating key...")
                         full_answer = ""
                         break
                     elif code_int in [400, 403]:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden during stream ({e}). Retrying with next key...")
+                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': Key invalid/forbidden during stream. Rotating key...")
                         full_answer = ""
                         break
                     else:
-                        print(f"[GEMINI {label}] Key #{key_idx+1} ({masked_key}) | Model '{m_name}': {e}")
                         continue
             if stream_success:
                 break
 
         if not stream_success:
-            print("[GEMINI STREAM ALL KEYS FAILED] Tất cả API keys đều bị quá tải hoặc lỗi. Trả về thông báo quá tải thân thiện.")
             full_answer = FRIENDLY_OVERLOAD_MESSAGE
             for word in FRIENDLY_OVERLOAD_MESSAGE.split(" "):
                 yield {"type": "token", "token": word + " "}
                 time.sleep(0.01)
 
         latency = round(time.time() - start_time, 2)
-        # Ghi log SQLite sau khi đã hoàn thành stream ra màn hình cho người dùng
         database.log_chat_interaction(question, full_answer, sources, latency, search_type=search_type, session_id=session_id)
-        print(f"[RAG STREAM QUERY HOÀN TẤT] Latency: {latency}s | Tổng độ dài câu trả lời: {len(full_answer)} ký tự\n{'='*60}")
         yield {"type": "done", "latency": latency, "full_text": full_answer}

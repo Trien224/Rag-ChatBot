@@ -1,6 +1,6 @@
-import sqlite3
 import json
-from typing import List, Dict, Any
+import sqlite3
+from typing import Any, Dict, List
 
 DB_FILE = "system_data.db"
 

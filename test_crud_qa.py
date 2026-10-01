@@ -1,17 +1,19 @@
-import os
 import io
+import os
 import sys
-import json
-from fastapi.testclient import TestClient
-from server import app, DOCS_DIR
-import data as database
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding='utf-8')
+from fastapi.testclient import TestClient
+
+from server import DOCS_DIR, app
+
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 client = TestClient(app)
 
-def run_crud_qa_audit():
+
+def test_crud_qa_audit():
+    """Comprehensive test covering all CRUD operations and RAG querying."""
     print("=" * 70)
     print("🔍 [BẮT ĐẦU KIỂM THỬ TOÀN DIỆN CRUD - FULLSTACK QA AUDIT]")
     print("=" * 70)
@@ -51,7 +53,7 @@ def run_crud_qa_audit():
     for res in upload_res.get("results", []):
         print(f"    * File '{res.get('filename')}': {res.get('status')} ({res.get('chunks_count')} chunks)")
 
-    # Kiểm tra file trên đĩa docs/ và trong SQLite
+    # Verify physical file & SQLite record
     saved_doc_path = os.path.join(DOCS_DIR, test_filename)
     assert os.path.exists(saved_doc_path), f"File {test_filename} không tồn tại trong thư mục docs/"
     print(f"    * Kiểm tra vật lý: File đã lưu thành công tại docs/{test_filename}")
@@ -93,11 +95,10 @@ def run_crud_qa_audit():
     print(f" -> DELETE /api/documents/{test_filename} : HTTP {r_del.status_code}")
     assert r_del.status_code == 200
     print(f"    * Phản hồi xóa: {r_del.json().get('message')}")
-    
+
     assert not os.path.exists(saved_doc_path), f"File {test_filename} vẫn còn trong docs/"
     print(f"    * Xác nhận: Đã xóa file vật lý trong docs/")
 
-    # Kiểm tra lại SQLite xem tài liệu đã biến mất chưa
     r_docs_after = client.get("/api/documents")
     docs_after = r_docs_after.json().get("documents", [])
     assert not any(d.get("filename") == test_filename for d in docs_after), "Tài liệu vẫn còn trong SQLite"
@@ -109,7 +110,7 @@ def run_crud_qa_audit():
     print(f" -> POST /api/clear (history) : HTTP {r_clear.status_code}")
     assert r_clear.status_code == 200
     print(f"    * Phản hồi clear: {r_clear.json().get('message')}")
-    
+
     r_hist_empty = client.get("/api/history")
     assert len(r_hist_empty.json().get("history", [])) == 0, "Lịch sử chat chưa được dọn sạch"
     print(f"    * Xác nhận: Bảng chat_logs đã được dọn sạch về 0")
@@ -118,5 +119,6 @@ def run_crud_qa_audit():
     print("✅ TOÀN BỘ CÁC TÁC VỤ CRUD (CREATE, READ, UPDATE, DELETE) ĐỀU HOẠT ĐỘNG HOÀN HẢO!")
     print("=" * 70)
 
+
 if __name__ == "__main__":
-    run_crud_qa_audit()
+    test_crud_qa_audit()

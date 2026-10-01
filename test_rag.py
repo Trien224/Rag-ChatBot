@@ -1,5 +1,6 @@
 import sys
 import time
+
 from rag_engine import RAGEngine
 
 if sys.platform == "win32":

@@ -1,7 +1,8 @@
-import requests
+import io
 import json
 import sys
-import io
+
+import requests
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
